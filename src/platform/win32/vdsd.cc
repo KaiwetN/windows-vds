@@ -80,6 +80,14 @@ constexpr std::size_t kAudioInjectionRingChunks = 96;
 constexpr std::uint32_t kAudioInjectionMagic = 0x41534456;
 constexpr std::uint16_t kAudioInjectionVersion = 1;
 constexpr std::uint16_t kAudioInjectionChannels = 2;
+/*
+ * Version 2 streams carry the full 4-channel USB audio layout
+ * [speaker L, speaker R, haptics L, haptics R], enabling controller
+ * speaker / headphone output alongside voice-coil haptics. Version 1
+ * (2-channel, haptics only) stays accepted for older clients.
+ */
+constexpr std::uint16_t kAudioInjectionVersionFull = 2;
+constexpr std::uint16_t kAudioInjectionChannelsFull = VDS_AUDIO_CHANNELS;
 constexpr std::uint32_t kAudioInjectionFrames = vds::kPcmWindowFrames;
 constexpr auto kAudioInjectionStaleTimeout = std::chrono::milliseconds(250);
 constexpr std::size_t kAudioLowWatermarkChunks = 0;
@@ -2872,9 +2880,13 @@ private:
     if (!read_exact(pipe, header_bytes)) {
       return;
     }
+    const bool full_layout =
+        header.version == kAudioInjectionVersionFull &&
+        header.channels == kAudioInjectionChannelsFull;
+    const bool haptics_only = header.version == kAudioInjectionVersion &&
+                              header.channels == kAudioInjectionChannels;
     if (header.magic != kAudioInjectionMagic ||
-        header.version != kAudioInjectionVersion ||
-        header.channels != kAudioInjectionChannels ||
+        (!full_layout && !haptics_only) ||
         header.sample_rate != VDS_AUDIO_SAMPLE_RATE ||
         header.frames_per_chunk != kAudioInjectionFrames) {
       logger_.log(vds::LogScope::Output, vds::LogLevel::Warn,
@@ -2884,25 +2896,30 @@ private:
 
     const std::uint64_t generation = g_audio_injection_bus.begin_stream();
     logger_.log(vds::LogScope::Output, vds::LogLevel::Info,
-                "desktop audio haptics stream connected pipe=" + pipe_name_);
+                std::string("desktop audio stream connected pipe=") +
+                    pipe_name_ +
+                    (full_layout ? " layout=speaker+haptics"
+                                 : " layout=haptics"));
     std::uint64_t chunk_count = 0;
     vds::PcmAudioExtractor extractor{kWindowsPcmWindowFrames};
-    std::array<std::uint8_t, kAudioInjectionFrames *
-                                 kAudioInjectionChannels *
-                                 sizeof(std::int16_t)>
-        stereo_pcm{};
+    std::vector<std::uint8_t> input_pcm(
+        kAudioInjectionFrames * header.channels * sizeof(std::int16_t));
     std::array<std::uint8_t, kAudioInjectionFrames * VDS_AUDIO_CHANNELS *
                                  sizeof(std::int16_t)>
         usb_pcm{};
-    while (!stopping() && read_exact(pipe, stereo_pcm)) {
-      usb_pcm.fill(0);
-      for (std::size_t frame = 0; frame < kAudioInjectionFrames; ++frame) {
-        const std::size_t source =
-            frame * kAudioInjectionChannels * sizeof(std::int16_t);
-        const std::size_t destination =
-            (frame * VDS_AUDIO_CHANNELS + 2) * sizeof(std::int16_t);
-        std::memcpy(usb_pcm.data() + destination, stereo_pcm.data() + source,
-                    kAudioInjectionChannels * sizeof(std::int16_t));
+    while (!stopping() && read_exact(pipe, input_pcm)) {
+      if (full_layout) {
+        std::memcpy(usb_pcm.data(), input_pcm.data(), usb_pcm.size());
+      } else {
+        usb_pcm.fill(0);
+        for (std::size_t frame = 0; frame < kAudioInjectionFrames; ++frame) {
+          const std::size_t source =
+              frame * kAudioInjectionChannels * sizeof(std::int16_t);
+          const std::size_t destination =
+              (frame * VDS_AUDIO_CHANNELS + 2) * sizeof(std::int16_t);
+          std::memcpy(usb_pcm.data() + destination, input_pcm.data() + source,
+                      kAudioInjectionChannels * sizeof(std::int16_t));
+        }
       }
       const auto chunks = extractor.push_usb_audio(usb_pcm);
       for (const auto &chunk : chunks) {
@@ -2924,8 +2941,8 @@ private:
           static_cast<DWORD>(kAudioInjectionFrames * VDS_AUDIO_CHANNELS *
                              sizeof(std::int16_t) * 4),
           static_cast<DWORD>(kAudioInjectionFrames *
-                             kAudioInjectionChannels * sizeof(std::int16_t) *
-                             4),
+                             kAudioInjectionChannelsFull *
+                             sizeof(std::int16_t) * 4),
           0, nullptr));
       if (!pipe) {
         logger_.log(vds::LogScope::Output, vds::LogLevel::Error,

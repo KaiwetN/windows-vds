@@ -64,6 +64,12 @@ public sealed class AudioHapticsSettings
     public int LeftMotorSource { get; set; }
     public int RightMotorSource { get; set; } = 1;
 
+    // Controller speaker / headphone output: the raw capture (pre-haptics-DSP)
+    // is sent on the stream's speaker channels. Only audible in native 0x36
+    // haptics mode - the 0x31 rumble report has no audio block.
+    public bool SpeakerEnabled { get; set; }
+    public double SpeakerVolumePercent { get; set; } = 60;
+
     public double EqBandHz(int band) => EqMode switch
     {
         "band3" => band switch { 0 => Eq3Band1Hz, 1 => Eq3Band2Hz, _ => Eq3Band3Hz },

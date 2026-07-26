@@ -591,6 +591,8 @@ public partial class MainWindow : Window
         AudioHapticsCeilingSlider.Value = _audioHapticsSettings.CeilingPercent;
         AudioHapticsInvertRightCheckBox.IsChecked = _audioHapticsSettings.InvertRight;
         SelectComboItemByTag(AudioHapticsChannelModeCombo, _audioHapticsSettings.ChannelMode);
+        AudioHapticsSpeakerCheckBox.IsChecked = _audioHapticsSettings.SpeakerEnabled;
+        AudioHapticsSpeakerVolumeSlider.Value = Math.Clamp(_audioHapticsSettings.SpeakerVolumePercent, 0, 100);
         AudioHapticsVoiceCoilGainSlider.Value = _audioHapticsSettings.HapticsGain;
         SelectComboItemByTag(AudioHapticsLeftSourceCombo, _audioHapticsSettings.LeftMotorSource.ToString());
         SelectComboItemByTag(AudioHapticsRightSourceCombo, _audioHapticsSettings.RightMotorSource.ToString());
@@ -671,6 +673,8 @@ public partial class MainWindow : Window
             CeilingPercent = Math.Round(AudioHapticsCeilingSlider.Value),
             ChannelMode = (AudioHapticsChannelModeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "stereo",
             InvertRight = AudioHapticsInvertRightCheckBox.IsChecked == true,
+            SpeakerEnabled = AudioHapticsSpeakerCheckBox.IsChecked == true,
+            SpeakerVolumePercent = Math.Round(AudioHapticsSpeakerVolumeSlider.Value / 5) * 5,
             HapticsGain = Math.Round(AudioHapticsVoiceCoilGainSlider.Value * 10) / 10,
             LeftMotorSource = ComboTagToInt(AudioHapticsLeftSourceCombo, 0),
             RightMotorSource = ComboTagToInt(AudioHapticsRightSourceCombo, 1),
@@ -782,6 +786,12 @@ public partial class MainWindow : Window
         AudioHapticsRightText.Text = $"{_audioHapticsSettings.RightPercent:0}%";
         AudioHapticsCeilingText.Text = $"{_audioHapticsSettings.CeilingPercent:0}%";
         AudioHapticsVoiceCoilGainText.Text = $"{_audioHapticsSettings.HapticsGain:0.0}x";
+        AudioHapticsSpeakerPanel.Visibility = _audioHapticsSettings.SpeakerEnabled
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        AudioHapticsSpeakerVolumeText.Text = _audioHapticsSettings.SpeakerEnabled
+            ? $"{_audioHapticsSettings.SpeakerVolumePercent:0}%"
+            : "";
         AudioHapticsHeadroomPanel.Visibility = _audioHapticsSettings.ExceedsSafeHeadroom
             ? Visibility.Visible
             : Visibility.Collapsed;

@@ -13,7 +13,12 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
     private const string PipeName = "vdsd-audio";
     private const int HapticsSampleRate = 48_000;
     private const int FramesPerChunk = 512;
-    private const int BytesPerChunk = FramesPerChunk * 2 * sizeof(short);
+    // Stream protocol v2: full 4-channel USB audio layout per frame -
+    // [speaker L, speaker R, haptics L, haptics R]. The speaker pair feeds
+    // the controller speaker / headphone jack (Opus-encoded by the daemon),
+    // the haptics pair drives the voice coils.
+    private const int ChannelsPerFrame = 4;
+    private const int BytesPerChunk = FramesPerChunk * ChannelsPerFrame * sizeof(short);
     private readonly object _lifecycleLock = new();
     private readonly HapticsProcessor _processor = new();
     private MMDeviceEnumerator? _enumerator;
@@ -224,8 +229,8 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
     {
         var header = new byte[16];
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0, 4), 0x41534456);
-        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(4, 2), 1);
-        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(6, 2), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(4, 2), 2);
+        BinaryPrimitives.WriteUInt16LittleEndian(header.AsSpan(6, 2), ChannelsPerFrame);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8, 4), HapticsSampleRate);
         BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(12, 4), FramesPerChunk);
         await stream.WriteAsync(header, cancellationToken);
@@ -351,18 +356,25 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
             }
 
             var step = format.SampleRate / (double)HapticsSampleRate;
+            var speakerGain = settings.SpeakerEnabled
+                ? (float)(Math.Clamp(settings.SpeakerVolumePercent, 0, 100) / 100)
+                : 0f;
             while (_sourcePosition + 1 < _sourceFrames.Count)
             {
                 var index = (int)_sourcePosition;
                 var fraction = (float)(_sourcePosition - index);
                 var current = _sourceFrames[index];
                 var next = _sourceFrames[index + 1];
-                var left = current.Left + (next.Left - current.Left) * fraction;
-                var right = current.Right + (next.Right - current.Right) * fraction;
-                ProcessFrame(left, right, settings, out left, out right);
-                outputLeftPeak = Math.Max(outputLeftPeak, Math.Abs(left));
-                outputRightPeak = Math.Max(outputRightPeak, Math.Abs(right));
-                WriteFrame(left, right);
+                var rawLeft = current.Left + (next.Left - current.Left) * fraction;
+                var rawRight = current.Right + (next.Right - current.Right) * fraction;
+                // Speaker channels carry the untouched capture; the haptics
+                // DSP chain (filters, gate, compression) stays haptics-only.
+                var speakerLeft = SoftLimit(rawLeft * speakerGain, .98f);
+                var speakerRight = SoftLimit(rawRight * speakerGain, .98f);
+                ProcessFrame(rawLeft, rawRight, settings, out var hapticsLeft, out var hapticsRight);
+                outputLeftPeak = Math.Max(outputLeftPeak, Math.Abs(hapticsLeft));
+                outputRightPeak = Math.Max(outputRightPeak, Math.Abs(hapticsRight));
+                WriteFrame(speakerLeft, speakerRight, hapticsLeft, hapticsRight);
                 _sourcePosition += step;
             }
             var discard = Math.Max(0, (int)_sourcePosition - 1);
@@ -509,13 +521,18 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
             outputRight = SoftLimit(right, ceiling);
         }
 
-        private void WriteFrame(float left, float right)
+        private void WriteFrame(float speakerLeft, float speakerRight,
+                                float hapticsLeft, float hapticsRight)
         {
-            var offset = _chunkFrames * sizeof(short) * 2;
+            var offset = _chunkFrames * sizeof(short) * ChannelsPerFrame;
             BinaryPrimitives.WriteInt16LittleEndian(
-                _chunk.AsSpan(offset, sizeof(short)), ToInt16(left));
+                _chunk.AsSpan(offset, sizeof(short)), ToInt16(speakerLeft));
             BinaryPrimitives.WriteInt16LittleEndian(
-                _chunk.AsSpan(offset + sizeof(short), sizeof(short)), ToInt16(right));
+                _chunk.AsSpan(offset + sizeof(short), sizeof(short)), ToInt16(speakerRight));
+            BinaryPrimitives.WriteInt16LittleEndian(
+                _chunk.AsSpan(offset + sizeof(short) * 2, sizeof(short)), ToInt16(hapticsLeft));
+            BinaryPrimitives.WriteInt16LittleEndian(
+                _chunk.AsSpan(offset + sizeof(short) * 3, sizeof(short)), ToInt16(hapticsRight));
             _chunkFrames++;
             if (_chunkFrames != FramesPerChunk)
             {

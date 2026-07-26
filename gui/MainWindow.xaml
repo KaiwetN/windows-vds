@@ -543,6 +543,24 @@
                                    Foreground="{StaticResource TextTertiary}" FontSize="12"
                                    LineHeight="18" Margin="0,5,0,0" />
 
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <CheckBox x:Name="AudioHapticsSpeakerCheckBox" Content="同时输出到手柄扬声器 / 耳机"
+                                      FontSize="12" Foreground="#475467" VerticalAlignment="Center"
+                                      Checked="AudioHapticsSetting_ValueChanged"
+                                      Unchecked="AudioHapticsSetting_ValueChanged" />
+                            <TextBlock x:Name="AudioHapticsSpeakerVolumeText" Grid.Column="1"
+                                       Foreground="{StaticResource AccentBrush}" FontSize="12"
+                                       VerticalAlignment="Center" />
+                        </Grid>
+                        <StackPanel x:Name="AudioHapticsSpeakerPanel" Visibility="Collapsed">
+                            <Slider x:Name="AudioHapticsSpeakerVolumeSlider" Minimum="0" Maximum="100"
+                                    TickFrequency="5" Margin="0,6,0,0"
+                                    ValueChanged="AudioHapticsSetting_ValueChanged" />
+                            <TextBlock Text="需要「原生音圈波形」模式；插入耳机后自动改走耳机口。"
+                                       TextWrapping="Wrap" Foreground="#5D6B80" FontSize="12" Margin="0,4,0,0" />
+                        </StackPanel>
+
                         <Border x:Name="AudioHapticsHeadroomPanel" Visibility="Collapsed"
                                 Background="#FEF6E7" BorderBrush="#F3D9A4" BorderThickness="1"
                                 CornerRadius="8" Padding="12,10" Margin="0,12,0,0">
