@@ -1,0 +1,147 @@
+#!/bin/sh
+set -e
+
+DKMS_NAME="vds_hcd"
+DKMS_VERSION="@DKMS_VERSION@"
+INSTALL_SERVICE="/usr/share/vds/install-service.sh"
+
+is_udev_running() {
+	command -v udevadm >/dev/null 2>&1 && [ -S /run/udev/control ]
+}
+
+unload_vds_hcd_module() {
+	if [ -d "/sys/module/$DKMS_NAME" ]; then
+		modprobe -r "$DKMS_NAME"
+	fi
+}
+
+remove_all_dkms_versions() {
+	dkms status 2>/dev/null |
+	while IFS= read -r line; do
+		module_version=${line%%,*}
+		module_version=${module_version%%:*}
+		module=${module_version%%/*}
+		version=${module_version#*/}
+		case "$module" in
+		"$DKMS_NAME" | "$DKMS_NAME"-*)
+			if [ -n "$version" ] && [ "$version" != "$module_version" ]; then
+				dkms remove -m "$module" -v "$version" --all
+			fi
+			;;
+		esac
+	done
+}
+
+print_bluetooth_pairing_notice() {
+	cat <<'NOTICE'
+## Initial Bluetooth Pairing
+
+> [!IMPORTANT]
+>
+> Current limitation: run `bluetoothd` with the input plugin disabled
+> (`--noplugin=input`). vDS needs direct ownership of the Bluetooth HID Control
+> and Interrupt L2CAP channels. If the normal BlueZ input plugin is active, it
+> can claim the controller first and expose it as a regular Bluetooth gamepad
+> instead of letting vDS bridge it as a virtual USB controller.
+>
+> In simpler terms, using vDS on Linux currently means giving up Bluetooth
+> devices like mice or keyboards. :( A BlueZ userspace stack patch is being
+> prepared to remove this limitation.
+>
+> In the meantime, the helper script `override-bluetoothd.sh` can install or
+> remove the required `bluetooth.service` drop-in override:
+>
+> ```sh
+> sudo ./override-bluetoothd.sh disable-input --restart
+> sudo ./override-bluetoothd.sh enable-input --restart
+> ```
+
+Pair each physical controller once before registering it with `vdsctl`. Start
+`bluetoothctl`, put the controller in Bluetooth pairing mode by holding Create
+and PS until the light bar blinks rapidly, then use the MAC address printed by
+`scan on`:
+
+```text
+agent NoInputNoOutput
+default-agent
+pairable on
+scan on
+pair XX:XX:XX:XX:XX:XX
+trust XX:XX:XX:XX:XX:XX
+scan off
+quit
+```
+
+When re-pairing a controller that BlueZ already knows, run
+`remove XX:XX:XX:XX:XX:XX` before `scan on`.
+
+NOTICE
+}
+
+print_audio_setup_notice() {
+	cat <<'NOTICE'
+## Audio Setup
+
+Configure the virtual controller audio output as 48 kHz 4-channel S16_LE PCM.
+The exact setup differs by audio stack, such as PipeWire, PulseAudio, ALSA, or
+JACK.
+
+For PipeWire/WirePlumber, set the controller card profile to `pro-audio`. Find
+the WirePlumber device id:
+
+```sh
+wpctl status
+```
+
+List the available profile indexes for that device:
+
+```sh
+pw-cli e <device-id> EnumProfile | awk '/Profile:index/{getline; idx=$2} /Profile:name/{getline; gsub(/"/, "", $2); print idx, $2}'
+```
+
+Set the `pro-audio` profile:
+
+```sh
+wpctl set-profile <device-id> <pro-audio-profile-index>
+```
+
+After setting the `pro-audio` profile, install the included WirePlumber rule. It
+gives the virtual controller stable display names, sets the output node to 4
+channels, disables channelmix normalization, and gives the microphone source a
+low priority:
+
+```sh
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+cp 99-vds-dualsense-wireplumber.conf ~/.config/wireplumber/wireplumber.conf.d/
+```
+
+Restart the user audio services after changing this file:
+
+```sh
+systemctl --user restart pipewire pipewire-pulse wireplumber
+```
+
+NOTICE
+}
+
+case "$1" in
+configure)
+	unload_vds_hcd_module
+	remove_all_dkms_versions
+	dkms add -m "$DKMS_NAME" -v "$DKMS_VERSION"
+	dkms build -m "$DKMS_NAME" -v "$DKMS_VERSION"
+	dkms install -m "$DKMS_NAME" -v "$DKMS_VERSION"
+
+	if is_udev_running; then
+		udevadm control --reload-rules || true
+		udevadm trigger --subsystem-match=input || true
+	fi
+	if [ -x "$INSTALL_SERVICE" ]; then
+		"$INSTALL_SERVICE" --enable --start
+	fi
+	print_bluetooth_pairing_notice
+	print_audio_setup_notice
+	;;
+esac
+
+exit 0

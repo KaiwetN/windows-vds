@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MIT
+obj-m += vds_hcd.o
+
+vds_hcd-y := vds_hcd_core.o vds_usb_core.o dualsense.o dualsense_edge.o
+
+ccflags-y += -I$(src)/../include -I$(src)/include
+ccflags-y += -DVDS_VERSION=\"$(or $(VDS_VERSION),unknown)\"

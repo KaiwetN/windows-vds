@@ -1,0 +1,3 @@
+# vDS creates virtual USB controllers below a platform HCD, so systemd-udevd
+# can classify the touchpad as internal. Treat it like the real USB controller.
+ACTION!="remove", SUBSYSTEM=="input", KERNEL=="event*", KERNELS=="vds_hcd.*", ENV{ID_INPUT_TOUCHPAD}=="1", ENV{ID_INPUT_TOUCHPAD_INTEGRATION}="external", ENV{ID_INTEGRATION}="external"

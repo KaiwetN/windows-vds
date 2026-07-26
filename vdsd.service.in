@@ -1,0 +1,14 @@
+[Unit]
+Description=vDS userspace daemon
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+ExecStartPre=modprobe vds_hcd
+ExecStart=@VDS_SYSTEMD_VDSD@
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,329 @@
+name: Build all packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      debian_revision:
+        description: Debian package revision
+        required: true
+        default: "1"
+      arch_pkgrel:
+        description: Arch Linux pkgrel
+        required: true
+        default: "1"
+      windows_pkgrel:
+        description: Windows package release suffix. Leave empty to omit it.
+        required: false
+        default: ""
+      release_label:
+        description: GitHub release label
+        required: true
+        type: choice
+        default: "None"
+        options:
+          - "None"
+          - "Pre-release"
+
+permissions:
+  contents: write
+
+jobs:
+  debian:
+    name: Debian package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            build-essential \
+            dkms \
+            cmake \
+            pkg-config
+          sudo apt-get install -y \
+            libopus-dev \
+            libudev-dev \
+            libdbus-1-dev \
+            libbluetooth-dev
+
+      - name: Build Debian package
+        run: |
+          packaging/debian/build-deb.sh \
+            --revision "${{ inputs.debian_revision }}" \
+            --output-dir "$PWD/dist/debian"
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v7
+        with:
+          name: debian-package
+          path: dist/debian/*.deb
+          if-no-files-found: error
+
+  archlinux:
+    name: Arch Linux package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Build Arch Linux package in Docker
+        run: |
+          docker run --rm \
+            -v "$PWD:/work" \
+            -w /work \
+            archlinux:latest \
+            bash -lc '
+              set -euo pipefail
+              pacman -Syu --noconfirm
+              pacman -S --noconfirm \
+                git \
+                base-devel \
+                dkms \
+                cmake \
+                pkgconf
+              pacman -S --noconfirm \
+                opus \
+                systemd \
+                dbus \
+                bluez-libs
+              pacman -S --noconfirm \
+                libarchive \
+                zstd
+              git config --global --add safe.directory /work
+              packaging/ArchLinux/build-arch.sh \
+                --pkgrel "${{ inputs.arch_pkgrel }}" \
+                --output-dir /work/dist/ArchLinux
+            '
+
+      - name: Upload Arch Linux package
+        uses: actions/upload-artifact@v7
+        with:
+          name: arch-package
+          path: dist/ArchLinux/*.pkg.tar.zst
+          if-no-files-found: error
+
+  windows:
+    name: Windows package
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Windows build tools
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          function Install-VdsWingetPackage {
+            param(
+              [Parameter(Mandatory = $true)]
+              [string]$PackageId
+            )
+
+            $PSNativeCommandUseErrorActionPreference = $false
+            $InstalledPackages = winget list `
+              --exact `
+              --id $PackageId `
+              --source winget `
+              --accept-source-agreements 2>&1 | Out-String
+            $AlreadyInstalled = $LASTEXITCODE -eq 0 -and
+              $InstalledPackages.Contains($PackageId)
+            $PSNativeCommandUseErrorActionPreference = $true
+
+            if ($AlreadyInstalled) {
+              return
+            }
+
+            winget install `
+              --exact `
+              --id $PackageId `
+              --source winget `
+              --silent `
+              --accept-package-agreements `
+              --accept-source-agreements
+          }
+
+          Install-VdsWingetPackage -PackageId Git.Git
+          Install-VdsWingetPackage -PackageId Kitware.CMake
+          Install-VdsWingetPackage -PackageId Microsoft.VCRedist.2015+.x64
+
+          $Vcpkg = Get-Command vcpkg.exe -ErrorAction SilentlyContinue
+          if ($Vcpkg) {
+            $VcpkgPath = $Vcpkg.Source
+          } else {
+            $VcpkgPath = "C:\vcpkg\vcpkg.exe"
+          }
+
+          $VcpkgRoot = Split-Path -Parent $VcpkgPath
+          "VDS_VCPKG_ROOT=$VcpkgRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Install WiX
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 4.*
+          "$env:USERPROFILE\.dotnet\tools" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Build userspace tools
+        shell: pwsh
+        run: |
+          cmake -S . -B build\windows `
+            -DINSTALL_SERVICE=YES `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VDS_VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
+          cmake --build build\windows --config Release --parallel
+
+      - name: Build Windows setup package
+        shell: pwsh
+        run: |
+          $Args = @{
+            ToolsDir = (Resolve-Path "build\windows\Release").Path
+            OutputDir = (Resolve-Path ".").Path + "\dist\windows"
+          }
+          if (![string]::IsNullOrWhiteSpace("${{ inputs.windows_pkgrel }}")) {
+            $Args.PkgRel = "${{ inputs.windows_pkgrel }}"
+          }
+          .\packaging\windows\build_installer.ps1 @Args
+
+      - name: Upload Windows setup package
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-package
+          path: dist/windows/*.exe
+          if-no-files-found: error
+
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs:
+      - debian
+      - archlinux
+      - windows
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve raw version
+        id: version
+        run: |
+          raw_version="$(./generate-version.sh)"
+          echo "raw_version=${raw_version}" >> "$GITHUB_OUTPUT"
+          echo "Raw version: ${raw_version}"
+
+      - name: Download packages
+        uses: actions/download-artifact@v8
+        with:
+          path: dist/release
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW_VERSION: ${{ steps.version.outputs.raw_version }}
+          RELEASE_LABEL: ${{ inputs.release_label }}
+        run: |
+          set -euo pipefail
+          mapfile -t assets < <(find dist/release -maxdepth 1 -type f | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "no release assets found" >&2
+            exit 1
+          fi
+
+          prerelease=false
+          if [ "$RELEASE_LABEL" = "Pre-release" ]; then
+            prerelease=true
+          fi
+
+          published_release_tags_output="$(
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" |
+              jq -r \
+                '[.[][] | select(.draft == false)] | sort_by(.published_at) | reverse | .[].tag_name'
+          )"
+          published_release_tags=()
+          if [ -n "$published_release_tags_output" ]; then
+            mapfile -t published_release_tags <<< "$published_release_tags_output"
+          fi
+
+          previous_release_tag=
+          for candidate_tag in "${published_release_tags[@]}"; do
+            if [ "$candidate_tag" = "$RAW_VERSION" ]; then
+              continue
+            fi
+            if ! git check-ref-format "refs/tags/${candidate_tag}" >/dev/null; then
+              echo "Ignoring release with invalid tag: ${candidate_tag}" >&2
+              continue
+            fi
+            if ! git rev-parse \
+              --verify \
+              --quiet \
+              "refs/tags/${candidate_tag}^{commit}" >/dev/null; then
+              git fetch \
+                --no-tags \
+                origin \
+                "refs/tags/${candidate_tag}:refs/tags/${candidate_tag}"
+            fi
+            if git merge-base \
+              --is-ancestor \
+              "refs/tags/${candidate_tag}^{commit}" \
+              "$GITHUB_SHA"; then
+              previous_release_tag="$candidate_tag"
+              break
+            fi
+            echo \
+              "Ignoring release tag outside the current history: ${candidate_tag}" \
+              >&2
+          done
+
+          release_notes="$(mktemp)"
+          {
+            echo '```text'
+            if [ -n "$previous_release_tag" ]; then
+              echo \
+                "Generating release notes from ${previous_release_tag} to ${RAW_VERSION}" \
+                >&2
+              git log \
+                --date-order \
+                --format='- %s' \
+                "${previous_release_tag}..${GITHUB_SHA}"
+            else
+              echo \
+                "No previous published release tag found in the current history" \
+                >&2
+              git log --date-order --format='- %s' "$GITHUB_SHA"
+            fi
+            echo '```'
+          } > "$release_notes"
+
+          if gh release view "$RAW_VERSION" >/dev/null 2>&1; then
+            gh release edit "$RAW_VERSION" \
+              --title "$RAW_VERSION" \
+              --notes-file "$release_notes"
+            gh release upload "$RAW_VERSION" "${assets[@]}" --clobber
+          else
+            gh release create "$RAW_VERSION" "${assets[@]}" \
+              --target "$GITHUB_SHA" \
+              --title "$RAW_VERSION" \
+              --notes-file "$release_notes"
+          fi
+
+          release_id="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RAW_VERSION}" --jq .id)"
+          gh api \
+            --method PATCH \
+            "repos/${GITHUB_REPOSITORY}/releases/${release_id}" \
+            -f "prerelease=${prerelease}"

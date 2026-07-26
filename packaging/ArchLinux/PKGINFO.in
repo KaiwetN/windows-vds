@@ -1,0 +1,27 @@
+pkgname = vds
+pkgbase = vds
+xdata = pkgtype=pkg
+pkgver = @PKGVER@-@PKGREL@
+pkgdesc = Virtual DualSense Bluetooth-to-USB bridge
+builddate = @BUILDDATE@
+packager = Jihong Min <hurryman2212@gmail.com>
+size = @SIZE@
+arch = @ARCH@
+license = MIT
+depend = bluez-libs
+depend = dbus
+depend = dkms
+depend = gcc-libs
+depend = glibc
+depend = kmod
+depend = make
+depend = opus
+depend = systemd-libs
+optdepend = base-devel
+optdepend = clang
+optdepend = linux-headers
+optdepend = linux-lts-headers
+optdepend = logrotate
+optdepend = pipewire
+optdepend = systemd
+optdepend = wireplumber

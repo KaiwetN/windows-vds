@@ -1,0 +1,11 @@
+format = 2
+pkgname = vds
+pkgbase = vds
+pkgver = @PKGVER@-@PKGREL@
+pkgarch = @ARCH@
+pkgbuild_sha256sum = SKIP
+packager = Jihong Min <hurryman2212@gmail.com>
+builddate = @BUILDDATE@
+builddir = @BUILDROOT@
+startdir = @REPOROOT@
+buildtool = vds packaging/ArchLinux/build-arch.sh

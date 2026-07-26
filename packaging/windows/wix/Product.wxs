@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="vDS" Manufacturer="Jihong Min" Version="$(var.VdsVersion)" UpgradeCode="{9C20F1D9-61F2-4DD6-A87B-C18CECB040FA}" Scope="perMachine" Compressed="yes">
+    <MediaTemplate EmbedCab="yes"/>
+    <Property Id="ARPSYSTEMCOMPONENT" Value="1"/>
+    <Property Id="ARPNOMODIFY" Value="1"/>
+    <Property Id="ARPNOREPAIR" Value="1"/>
+    <Property Id="INSTALL_USERSPACE" Value="1"/>
+    <Property Id="INSTALL_USBIP" Value="1"/>
+    <Property Id="INSTALL_HIDHIDE" Value="1"/>
+    <Property Id="INSTALL_PATH" Value="1" Secure="yes"/>
+    <Property Id="ADDLOCAL" Value="MainFeature" Secure="yes"/>
+    <Property Id="REMOVE_PROGRAMDATA" Secure="yes"/>
+    <Property Id="REINSTALL" Secure="yes"/>
+    <Property Id="REINSTALLMODE" Secure="yes"/>
+    <Property Id="VDS_REPAIR" Value="0" Secure="yes"/>
+    <Property Id="VDS_RERUN_INSTALL" Secure="yes"/>
+    <Property Id="VDS_DISPLAY_VERSION" Value="$(var.VdsDisplayVersion)" Secure="yes"/>
+    <Property Id="VDS_SETUP_SOURCE" Secure="yes"/>
+    <Property Id="VDS_SETUP_LAUNCHED" Secure="yes"/>
+    <Property Id="VDS_EXPLICIT_UNINSTALL" Secure="yes"/>
+    <Property Id="INSTALLFOLDER" Secure="yes">
+      <RegistrySearch Id="regsearch_vds_install_dir" Root="HKLM" Key="Software\vDS\Setup" Name="InstallDir" Type="raw"/>
+    </Property>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="vDS">
+        <Component Id="cmp_vdsd_exe" Guid="{2B27369F-CB51-4AC2-B579-34B1F01C4B7E}">
+          <File Id="fil_vdsd_exe" Source="$(var.ToolsDir)\vdsd.exe" KeyPath="yes"/>
+          <ServiceInstall Id="svc_vdsd" Name="vdsd" DisplayName="vDS Daemon" Description="vDS userspace daemon" Type="ownProcess" Start="auto" ErrorControl="normal" Vital="yes"/>
+          <ServiceControl Id="svcctl_vdsd" Name="vdsd" Stop="both" Remove="uninstall" Wait="yes"/>
+          <RegistryValue Root="HKLM" Key="Software\vDS\Setup" Name="InstallDir" Type="string" Value="[INSTALLFOLDER]"/>
+        </Component>
+        <Component Id="cmp_vdsctl_exe" Guid="{46B7DD7E-9768-4851-B0F8-361443D74F9F}">
+          <File Id="fil_vdsctl_exe" Source="$(var.ToolsDir)\vdsctl.exe" KeyPath="yes"/>
+        </Component>
+        <Component Id="cmp_opus_dll" Guid="{06CE51BC-AD78-46B4-AFAF-F52025B326F1}">
+          <File Id="fil_opus_dll" Source="$(var.ToolsDir)\opus.dll" KeyPath="yes"/>
+        </Component>
+        <Component Id="cmp_machine_path" Guid="{BF2684F5-F63B-4EB6-90A0-8A9F9A0E14FD}" Condition="INSTALL_PATH = &quot;1&quot;">
+          <Environment Id="env_machine_path" Name="Path" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes"/>
+          <RegistryValue Root="HKLM" Key="Software\vDS\Setup" Name="PathEntry" Type="string" Value="1" KeyPath="yes"/>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="MainFeature" Title="vDS" Level="1">
+      <ComponentRef Id="cmp_vdsd_exe"/>
+      <ComponentRef Id="cmp_vdsctl_exe"/>
+      <ComponentRef Id="cmp_opus_dll"/>
+      <ComponentRef Id="cmp_machine_path"/>
+    </Feature>
+    <CustomAction Id="SetVdsRepair" Property="VDS_REPAIR" Value="1"/>
+    <CustomAction Id="SetVdsRerunInstall" Property="VDS_RERUN_INSTALL" Value="1"/>
+    <CustomAction Id="SetVdsReinstall" Property="REINSTALL" Value="ALL"/>
+    <CustomAction Id="SetVdsReinstallMode" Property="REINSTALLMODE" Value="amus"/>
+    <CustomAction Id="SetVdsExecuteRepair" Property="VDS_REPAIR" Value="1"/>
+    <CustomAction Id="SetVdsRemoveAll" Property="REMOVE" Value="ALL"/>
+    <CustomAction Id="SetVdsExplicitUninstall" Property="VDS_EXPLICIT_UNINSTALL" Value="1"/>
+    <CustomAction Id="SetBrowseProperty" Property="_BrowseProperty" Value="INSTALLFOLDER"/>
+    <Binary Id="bin_setup_actions" SourceFile="$(var.SetupActions)"/>
+    <CustomAction Id="UpdateDisplayVersion" BinaryRef="bin_setup_actions" DllEntry="UpdateDisplayVersion" Execute="immediate" Return="ignore"/>
+    <CustomAction Id="ClearPathMarker" BinaryRef="bin_setup_actions" DllEntry="ClearPathMarker" Execute="deferred" Return="ignore" Impersonate="no"/>
+    <CustomAction Id="SetRemoveInstallDirectoriesData" Property="RemoveInstallDirectories" Value="[INSTALLFOLDER]"/>
+    <CustomAction Id="RemoveInstallDirectories" BinaryRef="bin_setup_actions" DllEntry="RemoveInstallDirectories" Execute="deferred" Return="ignore" Impersonate="no"/>
+    <CustomAction Id="SetRequestProgramDataRemovalData" Property="RequestProgramDataRemoval" Value="[REMOVE_PROGRAMDATA]"/>
+    <CustomAction Id="RequestProgramDataRemoval" BinaryRef="bin_setup_actions" DllEntry="RequestProgramDataRemoval" Execute="deferred" Return="check" Impersonate="no"/>
+    <CustomAction Id="RemoveVdsRegistry" BinaryRef="bin_setup_actions" DllEntry="RemoveVdsRegistry" Execute="deferred" Return="ignore" Impersonate="no"/>
+    <Binary Id="bin_uninstall_runner" SourceFile="$(var.UninstallRunner)"/>
+    <CustomAction Id="UninstallExistingInstall" BinaryRef="bin_uninstall_runner" ExeCommand="[ProductCode]" Execute="deferred" Return="ignore" Impersonate="no"/>
+    <InstallExecuteSequence>
+      <Custom Action="SetVdsExecuteRepair" Before="CostFinalize" Condition="Installed AND REINSTALL"/>
+      <Custom Action="UninstallExistingInstall" After="InstallInitialize" Condition="VDS_EXPLICIT_UNINSTALL = &quot;1&quot; OR VDS_RERUN_INSTALL = &quot;1&quot; OR (REMOVE &lt;&gt; &quot;ALL&quot; AND NOT Installed)"/>
+      <Custom Action="ClearPathMarker" After="InstallServices" Condition="(NOT Installed OR VDS_REPAIR = &quot;1&quot;) AND INSTALL_PATH &lt;&gt; &quot;1&quot;"/>
+      <Custom Action="UpdateDisplayVersion" After="InstallFinalize" Condition="REMOVE &lt;&gt; &quot;ALL&quot;"/>
+      <Custom Action="SetRemoveInstallDirectoriesData" After="RemoveFiles" Condition="REMOVE = &quot;ALL&quot; AND VDS_EXPLICIT_UNINSTALL = &quot;1&quot;"/>
+      <Custom Action="RemoveInstallDirectories" After="SetRemoveInstallDirectoriesData" Condition="REMOVE = &quot;ALL&quot; AND VDS_EXPLICIT_UNINSTALL = &quot;1&quot;"/>
+      <Custom Action="SetRequestProgramDataRemovalData" After="RemoveInstallDirectories" Condition="REMOVE = &quot;ALL&quot; AND VDS_EXPLICIT_UNINSTALL = &quot;1&quot;"/>
+      <Custom Action="RequestProgramDataRemoval" After="SetRequestProgramDataRemovalData" Condition="REMOVE = &quot;ALL&quot; AND VDS_EXPLICIT_UNINSTALL = &quot;1&quot;"/>
+      <Custom Action="RemoveVdsRegistry" After="RequestProgramDataRemoval" Condition="REMOVE = &quot;ALL&quot; AND VDS_EXPLICIT_UNINSTALL = &quot;1&quot;"/>
+    </InstallExecuteSequence>
+    <UI>
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Segoe UI" Size="9"/>
+      <TextStyle Id="WixUI_Font_Title" FaceName="Segoe UI" Size="12" Bold="yes"/>
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal"/>
+      <ProgressText Action="UninstallExistingInstall" Message="Uninstalling existing vDS installation"/>
+      <ProgressText Action="InstallFiles" Message="Installing vDS userspace tools"/>
+      <ProgressText Action="InstallServices" Message="Registering the vDS Windows service"/>
+      <ProgressText Action="ClearPathMarker" Message="Updating vDS PATH registration"/>
+      <ProgressText Action="RemoveInstallDirectories" Message="Removing vDS userspace files"/>
+      <ProgressText Action="RequestProgramDataRemoval" Message="Preparing vDS ProgramData cleanup"/>
+      <ProgressText Action="RemoveVdsRegistry" Message="Removing vDS registry settings"/>
+      <Dialog Id="LicenseDlg" Width="370" Height="270" Title="Welcome to the vDS Setup Wizard">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="18" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Welcome to the vDS Setup Wizard"/>
+        <Control Id="Description" Type="Text" X="25" Y="26" Width="330" Height="24" Transparent="yes" NoPrefix="yes" Text="Please review the license terms before installing vDS."/>
+        <Control Id="TopLine" Type="Line" X="0" Y="50" Width="370" Height="0"/>
+        <Control Id="LicenseText" Type="ScrollableText" X="20" Y="60" Width="330" Height="140" Sunken="yes" TabSkip="no">
+          <Text SourceFile="$(var.LicenseRtf)"/>
+        </Control>
+        <Control Id="LicenseAcceptedCheckBox" Type="CheckBox" X="20" Y="207" Width="330" Height="18" CheckBoxValue="1" Property="LICENSEACCEPTED" Text="I agree to the license terms and conditions"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Disabled="yes" Text="Back"/>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="SpawnDialog" Value="LicenseRequiredDlg" Order="1" Condition="LICENSEACCEPTED &lt;&gt; &quot;1&quot;"/>
+          <Publish Event="NewDialog" Value="ComponentsDlg" Order="2" Condition="LICENSEACCEPTED = &quot;1&quot;"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+      <Dialog Id="LicenseRequiredDlg" Width="260" Height="85" Title="[ProductName] Setup">
+        <Control Id="Message" Type="Text" X="15" Y="15" Width="230" Height="30" NoPrefix="yes" Text="You must agree to the license terms before installing vDS."/>
+        <Control Id="Ok" Type="PushButton" X="102" Y="55" Width="56" Height="17" Default="yes" Cancel="yes" Text="OK">
+          <Publish Event="EndDialog" Value="Return"/>
+        </Control>
+      </Dialog>
+      <Dialog Id="ComponentsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="18" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Welcome to the vDS Setup Wizard"/>
+        <Control Id="Description" Type="Text" X="25" Y="26" Width="330" Height="24" Transparent="yes" NoPrefix="yes" Text="Choose the vDS components to install. Setup also installs missing USB/IP and HidHide dependencies."/>
+        <Control Id="TopLine" Type="Line" X="0" Y="50" Width="370" Height="0"/>
+        <Control Id="PackageListTitle" Type="Text" X="25" Y="64" Width="205" Height="12" NoPrefix="yes" Text="Packages:"/>
+        <Control Id="PackageBox" Type="GroupBox" X="25" Y="78" Width="205" Height="118"/>
+        <Control Id="UserspaceTools" Type="CheckBox" X="40" Y="92" Width="175" Height="18" CheckBoxValue="1" Property="INSTALL_USERSPACE" Disabled="yes" Text="Userspace tools"/>
+        <Control Id="AddToPath" Type="CheckBox" X="58" Y="112" Width="160" Height="18" CheckBoxValue="1" Property="INSTALL_PATH" Text="Add install directory to PATH"/>
+        <Control Id="Usbip" Type="CheckBox" X="40" Y="136" Width="175" Height="18" CheckBoxValue="1" Property="INSTALL_USBIP" Disabled="yes" Text="USB/IP client (usbip-win2)"/>
+        <Control Id="HidHide" Type="CheckBox" X="40" Y="160" Width="175" Height="18" CheckBoxValue="1" Property="INSTALL_HIDHIDE" Disabled="yes" Text="HidHide"/>
+        <Control Id="UserspaceDetails" Type="Text" X="244" Y="84" Width="104" Height="96" NoPrefix="yes" Text="Installs vdsd.exe, vdsctl.exe, the runtime DLL, and the vdsd Windows service. Missing USB/IP and HidHide dependencies are downloaded separately."/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="LicenseDlg"/>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="NewDialog" Value="InstallDirDlg"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+      <Dialog Id="InstallDirDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="18" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Welcome to the vDS Setup Wizard"/>
+        <Control Id="Description" Type="Text" X="25" Y="26" Width="330" Height="24" Transparent="yes" NoPrefix="yes" Text="Choose where to install the vDS userspace tools."/>
+        <Control Id="TopLine" Type="Line" X="0" Y="50" Width="370" Height="0"/>
+        <Control Id="InstallPathLabel" Type="Text" X="25" Y="72" Width="320" Height="18" NoPrefix="yes" Text="Install directory:"/>
+        <Control Id="InstallPath" Type="PathEdit" X="25" Y="96" Width="252" Height="18" Property="INSTALLFOLDER"/>
+        <Control Id="Browse" Type="PushButton" X="284" Y="95" Width="61" Height="19" Text="Browse...">
+          <Publish Event="DoAction" Value="SetBrowseProperty" Order="1"/>
+          <Publish Event="SpawnDialog" Value="BrowseDlg" Order="2"/>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
+          <Publish Event="NewDialog" Value="ComponentsDlg"/>
+        </Control>
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Next">
+          <Publish Event="SetTargetPath" Value="INSTALLFOLDER" Order="1"/>
+          <Publish Event="DoAction" Value="SetVdsRepair" Order="2" Condition="Installed"/>
+          <Publish Event="DoAction" Value="SetVdsRerunInstall" Order="3" Condition="Installed"/>
+          <Publish Event="DoAction" Value="SetVdsReinstall" Order="4" Condition="Installed"/>
+          <Publish Event="DoAction" Value="SetVdsReinstallMode" Order="5" Condition="Installed"/>
+          <Publish Event="EndDialog" Value="Return" Order="6"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+      <Dialog Id="BrowseDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="18" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Choose Install Folder"/>
+        <Control Id="Description" Type="Text" X="25" Y="26" Width="330" Height="24" Transparent="yes" NoPrefix="yes" Text="Select the folder where the vDS userspace tools will be installed."/>
+        <Control Id="TopLine" Type="Line" X="0" Y="50" Width="370" Height="0"/>
+        <Control Id="LookInLabel" Type="Text" X="25" Y="64" Width="60" Height="18" NoPrefix="yes" Text="Look in:"/>
+        <Control Id="DirectoryCombo" Type="DirectoryCombo" X="85" Y="62" Width="260" Height="80" Property="_BrowseProperty" Indirect="yes" Fixed="yes" Remote="yes"/>
+        <Control Id="DirectoryList" Type="DirectoryList" X="25" Y="88" Width="320" Height="92" Property="_BrowseProperty" Indirect="yes" Sunken="yes" TabSkip="no"/>
+        <Control Id="FolderLabel" Type="Text" X="25" Y="190" Width="60" Height="18" NoPrefix="yes" Text="Folder:"/>
+        <Control Id="FolderPath" Type="PathEdit" X="85" Y="188" Width="260" Height="18" Property="_BrowseProperty" Indirect="yes"/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="OK" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="OK">
+          <Publish Event="SetTargetPath" Value="[_BrowseProperty]" Order="1"/>
+          <Publish Event="EndDialog" Value="Return" Order="2"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="Reset" Value="0" Order="1"/>
+          <Publish Event="EndDialog" Value="Return" Order="2"/>
+        </Control>
+      </Dialog>
+      <Dialog Id="ProgressDlg" Width="370" Height="270" Title="[ProductName] Setup" Modeless="yes">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="18" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Installing vDS"/>
+        <Control Id="Description" Type="Text" X="25" Y="26" Width="330" Height="24" Transparent="yes" NoPrefix="yes" Text="Please wait while vDS is installed."/>
+        <Control Id="TopLine" Type="Line" X="0" Y="50" Width="370" Height="0"/>
+        <Control Id="ActionText" Type="Text" X="25" Y="92" Width="320" Height="18" NoPrefix="yes" Text="Preparing installation...">
+          <Subscribe Event="ActionText" Attribute="Text"/>
+        </Control>
+        <Control Id="ProgressBar" Type="ProgressBar" X="25" Y="118" Width="320" Height="12">
+          <Subscribe Event="SetProgress" Attribute="Progress"/>
+        </Control>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Disabled="yes" Text="Cancel"/>
+      </Dialog>
+      <Dialog Id="UninstallDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="340" Height="18" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Remove vDS"/>
+        <Control Id="Description" Type="Text" X="25" Y="26" Width="330" Height="24" Transparent="yes" NoPrefix="yes" Text="Choose whether to remove vDS from this computer."/>
+        <Control Id="TopLine" Type="Line" X="0" Y="50" Width="370" Height="0"/>
+        <Control Id="Message" Type="Text" X="25" Y="80" Width="320" Height="48" NoPrefix="yes" Text="Setup will remove the vDS userspace tools managed by this installer. USB/IP and HidHide are shared dependencies and will remain installed."/>
+        <Control Id="RemoveProgramData" Type="CheckBox" X="25" Y="148" Width="320" Height="18" CheckBoxValue="1" Property="REMOVE_PROGRAMDATA" Text="Remove [CommonAppDataFolder]vDS"/>
+        <Control Id="RemoveProgramDataNote" Type="Text" X="45" Y="172" Width="300" Height="36" NoPrefix="yes" Text="This deletes vdsd.db and vdsd.log. Leave unchecked to keep controller registrations and logs."/>
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
+        <Control Id="Remove" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="Remove">
+          <Publish Event="DoAction" Value="SetVdsExplicitUninstall" Order="1"/>
+          <Publish Event="DoAction" Value="SetVdsRemoveAll" Order="2"/>
+          <Publish Event="EndDialog" Value="Return" Order="3"/>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="Cancel">
+          <Publish Event="EndDialog" Value="Exit"/>
+        </Control>
+      </Dialog>
+      <InstallUISequence>
+        <Show Dialog="UninstallDlg" Before="LicenseDlg" Condition="Installed AND (VDS_EXPLICIT_UNINSTALL = &quot;1&quot; OR REMOVE = &quot;ALL&quot; OR VDS_SETUP_LAUNCHED &lt;&gt; &quot;1&quot;)"/>
+        <Show Dialog="LicenseDlg" Before="ProgressDlg" Condition="REMOVE &lt;&gt; &quot;ALL&quot; AND NOT (Installed AND VDS_SETUP_LAUNCHED &lt;&gt; &quot;1&quot;)"/>
+        <Show Dialog="ProgressDlg" Before="ExecuteAction" Condition="NOT Installed OR Installed"/>
+      </InstallUISequence>
+    </UI>
+  </Package>
+</Wix>

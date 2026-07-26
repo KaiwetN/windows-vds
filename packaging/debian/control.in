@@ -1,0 +1,15 @@
+Package: vds
+Version: @VERSION@
+Section: utils
+Priority: optional
+Architecture: @ARCH@
+Maintainer: Jihong Min <hurryman2212@gmail.com>
+Installed-Size: @INSTALLED_SIZE@
+Depends: bluez, dkms, kmod, make, libc6, libbluetooth3, libdbus-1-3, libopus0, libstdc++6, libudev1
+Recommends: logrotate
+Suggests: linux-headers-amd64 | linux-headers-generic, clang, build-essential, pipewire, systemd, udev, wireplumber
+Description: Virtual DualSense Bluetooth-to-USB bridge
+ vDS exposes Bluetooth-connected DualSense-class controllers through a virtual
+ USB controller so games and applications can use features normally available
+ only over USB. The Debian package installs the userspace daemon, CLI, systemd
+ unit, udev rule, and DKMS source for the Linux virtual USB HCD.

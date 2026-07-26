@@ -1,0 +1,203 @@
+# shellcheck shell=bash
+_dkms_name="vds_hcd"
+_dkms_version="@DKMS_VERSION@"
+_install_service="/usr/share/vds/install-service.sh"
+_uninstall_service="/usr/share/vds/uninstall-service.sh"
+
+_is_systemd_running() {
+	command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]
+}
+
+_is_udev_running() {
+	command -v udevadm >/dev/null 2>&1 && [ -S /run/udev/control ]
+}
+
+_unload_vds_hcd_module() {
+	if [ -d "/sys/module/$_dkms_name" ]; then
+		modprobe -r "$_dkms_name"
+	fi
+}
+
+_dkms_remove_all_versions() {
+	local ignore_errors=${1:-}
+	local line
+	local module
+	local module_version
+	local version
+
+	while IFS= read -r line; do
+		module_version=${line%%,*}
+		module_version=${module_version%%:*}
+		module=${module_version%%/*}
+		version=${module_version#*/}
+		case "$module" in
+		"$_dkms_name" | "$_dkms_name"-*)
+			if [ -n "$version" ] && [ "$version" != "$module_version" ]; then
+				if ! dkms remove -m "$module" -v "$version" --all; then
+					[ "$ignore_errors" = "--ignore-errors" ] || return 1
+				fi
+			fi
+			;;
+		esac
+	done < <(dkms status 2>/dev/null || true)
+}
+
+_dkms_install_current() {
+	_unload_vds_hcd_module || return 1
+	_dkms_remove_all_versions
+	dkms add -m "$_dkms_name" -v "$_dkms_version"
+	dkms build -m "$_dkms_name" -v "$_dkms_version"
+	dkms install -m "$_dkms_name" -v "$_dkms_version"
+}
+
+_reload_udev_rules() {
+	if _is_udev_running; then
+		udevadm control --reload-rules || true
+		udevadm trigger --subsystem-match=input || true
+	fi
+}
+
+_install_vdsd_service() {
+	if [ -x "$_install_service" ]; then
+		"$_install_service" --enable --start
+	fi
+}
+
+_stop_vdsd_service() {
+	if [ -x "$_uninstall_service" ]; then
+		"$_uninstall_service" --stop || true
+	fi
+}
+
+_reload_systemd() {
+	if _is_systemd_running; then
+		systemctl daemon-reload || true
+	fi
+}
+
+_print_bluetooth_pairing_notice() {
+	cat <<'NOTICE'
+## Initial Bluetooth Pairing
+
+> [!IMPORTANT]
+>
+> Current limitation: run `bluetoothd` with the input plugin disabled
+> (`--noplugin=input`). vDS needs direct ownership of the Bluetooth HID Control
+> and Interrupt L2CAP channels. If the normal BlueZ input plugin is active, it
+> can claim the controller first and expose it as a regular Bluetooth gamepad
+> instead of letting vDS bridge it as a virtual USB controller.
+>
+> In simpler terms, using vDS on Linux currently means giving up Bluetooth
+> devices like mice or keyboards. :( A BlueZ userspace stack patch is being
+> prepared to remove this limitation.
+>
+> In the meantime, the helper script `override-bluetoothd.sh` can install or
+> remove the required `bluetooth.service` drop-in override:
+>
+> ```sh
+> sudo ./override-bluetoothd.sh disable-input --restart
+> sudo ./override-bluetoothd.sh enable-input --restart
+> ```
+
+Pair each physical controller once before registering it with `vdsctl`. Start
+`bluetoothctl`, put the controller in Bluetooth pairing mode by holding Create
+and PS until the light bar blinks rapidly, then use the MAC address printed by
+`scan on`:
+
+```text
+agent NoInputNoOutput
+default-agent
+pairable on
+scan on
+pair XX:XX:XX:XX:XX:XX
+trust XX:XX:XX:XX:XX:XX
+scan off
+quit
+```
+
+When re-pairing a controller that BlueZ already knows, run
+`remove XX:XX:XX:XX:XX:XX` before `scan on`.
+
+NOTICE
+}
+
+_print_audio_setup_notice() {
+	cat <<'NOTICE'
+## Audio Setup
+
+Configure the virtual controller audio output as 48 kHz 4-channel S16_LE PCM.
+The exact setup differs by audio stack, such as PipeWire, PulseAudio, ALSA, or
+JACK.
+
+For PipeWire/WirePlumber, set the controller card profile to `pro-audio`. Find
+the WirePlumber device id:
+
+```sh
+wpctl status
+```
+
+List the available profile indexes for that device:
+
+```sh
+pw-cli e <device-id> EnumProfile | awk '/Profile:index/{getline; idx=$2} /Profile:name/{getline; gsub(/"/, "", $2); print idx, $2}'
+```
+
+Set the `pro-audio` profile:
+
+```sh
+wpctl set-profile <device-id> <pro-audio-profile-index>
+```
+
+After setting the `pro-audio` profile, install the included WirePlumber rule. It
+gives the virtual controller stable display names, sets the output node to 4
+channels, disables channelmix normalization, and gives the microphone source a
+low priority:
+
+```sh
+mkdir -p ~/.config/wireplumber/wireplumber.conf.d
+cp 99-vds-dualsense-wireplumber.conf ~/.config/wireplumber/wireplumber.conf.d/
+```
+
+Restart the user audio services after changing this file:
+
+```sh
+systemctl --user restart pipewire pipewire-pulse wireplumber
+```
+
+NOTICE
+}
+
+post_install() {
+	_dkms_install_current
+	_reload_udev_rules
+	_install_vdsd_service
+	_print_bluetooth_pairing_notice
+	_print_audio_setup_notice
+}
+
+pre_upgrade() {
+	_stop_vdsd_service
+	_unload_vds_hcd_module || return 1
+	_dkms_remove_all_versions --ignore-errors
+}
+
+post_upgrade() {
+	_dkms_install_current
+	_reload_udev_rules
+	_install_vdsd_service
+	_print_bluetooth_pairing_notice
+	_print_audio_setup_notice
+}
+
+pre_remove() {
+	if [ -x "$_uninstall_service" ]; then
+		"$_uninstall_service" --stop --disable || true
+	fi
+	_unload_vds_hcd_module || return 1
+	_dkms_remove_all_versions --ignore-errors
+}
+
+post_remove() {
+	_reload_systemd
+	_reload_udev_rules
+}
