@@ -16,6 +16,7 @@ enum class VdsctlCommand {
   Detach,
   List,
   ListTargets,
+  Info,
   Trace,
   AudioBuffer,
   Effects,
@@ -52,6 +53,9 @@ std::string run_vdsctl_list(
     int argc,
     const std::function<std::string(const std::string &)> &request_control);
 std::string run_vdsctl_list_targets(
+    int argc,
+    const std::function<std::string(const std::string &)> &request_control);
+std::string run_vdsctl_info(
     int argc,
     const std::function<std::string(const std::string &)> &request_control);
 std::string run_vdsctl_trace(

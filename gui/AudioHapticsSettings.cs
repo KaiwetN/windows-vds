@@ -6,6 +6,19 @@ namespace VdsGui;
 public sealed class AudioHapticsSettings
 {
     public string DeviceId { get; set; } = "";
+    // bridge = existing vdsd virtual bridge (Bluetooth controller);
+    // usb_audio = DualSense wired via USB, driven through its audio endpoint;
+    // usb_rumble = DualShock 4 wired via USB, driven through HID rumble.
+    public string TargetMode { get; set; } = "bridge";
+    public string TargetDeviceId { get; set; } = "";
+    // Wired DualSense / DS4 output latency in milliseconds. Controls the
+    // WasapiOut buffer for the USB audio path; the companion playback queue
+    // is kept small so this stays the dominant tunable.
+    public double UsbLatencyMs { get; set; } = 30;
+    // Desktop loopback capture buffer in milliseconds.
+    public double CaptureLatencyMs { get; set; } = 10;
+    // BufferedWaveProvider queue for USB speaker/haptics playback in ms.
+    public double PlaybackQueueMs { get; set; } = 40;
     public bool AutoStart { get; set; }
     public double StrengthPercent { get; set; } = 100;
     public double InputGainDb { get; set; } = 0;
@@ -69,6 +82,9 @@ public sealed class AudioHapticsSettings
     // haptics mode - the 0x31 rumble report has no audio block.
     public bool SpeakerEnabled { get; set; }
     public double SpeakerVolumePercent { get; set; } = 60;
+    // DualSense USB speaker preamp gain (HID audio_control2, 0-7).
+    // Value 2 corresponds to roughly +6dB per the Linux driver notes.
+    public int SpeakerPreamp { get; set; }
 
     public double EqBandHz(int band) => EqMode switch
     {
@@ -170,9 +186,18 @@ public sealed class AudioHapticsSettings
         "audio-haptics.json");
 }
 
-public sealed record AudioRenderDevice(string Id, string Name, bool IsDefault)
+public sealed record AudioRenderDevice(
+    string Id,
+    string Name,
+    bool IsDefault,
+    string ControllerDeviceId = "")
 {
-    public string DisplayName => IsDefault ? $"{Name}（默认）" : Name;
+    public string DisplayName =>
+        string.IsNullOrWhiteSpace(ControllerDeviceId)
+            ? (IsDefault ? $"{Name}（默认）" : Name)
+            : (IsDefault ? $"{Name}（默认，手柄端点）" : $"{Name}（手柄端点）");
 }
+
+public sealed record AudioHapticsTarget(string Mode, string DeviceId, string DisplayName);
 
 public sealed record AudioHapticsLevels(float InputLeft, float InputRight, float OutputLeft, float OutputRight);

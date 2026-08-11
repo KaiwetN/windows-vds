@@ -34,6 +34,7 @@
 
 #include <windows.h>
 
+#include <hidsdi.h>
 #include <mmsystem.h>
 
 #include "jsonl.hh"
@@ -44,6 +45,7 @@
 #include "vds_build_info.hh"
 #include "vds_common.hh"
 #include "vds_config.hh"
+#include "vds_device_info.hh"
 #include "vds_fs.hh"
 #include "vds_hidhide.hh"
 #include "vds_io.hh"
@@ -174,6 +176,12 @@ struct AudioInjectionSnapshot {
   std::vector<vds::AudioChunk> chunks;
 };
 
+struct AudioInjectionSubscription {
+  std::uint64_t generation = 0;
+  std::uint64_t last_sequence = 0;
+  bool wait_for_next_stream = false;
+};
+
 struct StandardRumbleLevels {
   std::uint8_t right_motor = 0;
   std::uint8_t left_motor = 0;
@@ -236,6 +244,20 @@ public:
     if (generation == generation_) {
       streaming_ = false;
     }
+  }
+
+  AudioInjectionSubscription subscribe() const {
+    std::lock_guard guard(mutex_);
+    return AudioInjectionSubscription{
+        .generation = generation_,
+        .last_sequence = next_sequence_ - 1,
+        // A bridge that appears while desktop audio haptics are already
+        // running must not silently join that stream. This is both surprising
+        // on reconnect and makes an unrelated controller start vibrating as
+        // soon as it is attached. The next begin_stream() advances the
+        // generation and explicitly opts the live bridge in.
+        .wait_for_next_stream = streaming_,
+    };
   }
 
   AudioInjectionSnapshot snapshot(std::uint64_t generation,
@@ -816,6 +838,7 @@ struct BridgeState {
   bool audio_haptics_sent_seen = false;
   bool audio_out_stream_active = false;
   bool audio_injection_stream_active = false;
+  bool audio_injection_wait_for_next_stream = false;
   bool audio_in_stream_active = false;
   bool mic_muted = false;
   bool mute_button_down = false;
@@ -930,19 +953,43 @@ find_connected_bluetooth_device(const std::string &address,
   }
 }
 
-std::vector<vds::ControllerTarget> list_windows_controller_targets() {
+std::vector<vds::ControllerTarget> list_windows_controller_targets(
+    vds::Logger &logger) {
   std::vector<vds::ControllerTarget> targets;
-  for (const auto &device : list_bluetooth_controller_devices()) {
-    if (!device.profile_valid || device.address.empty()) {
+  try {
+    for (const auto &device : list_bluetooth_controller_devices()) {
+      if (!device.profile_valid || device.address.empty()) {
+        continue;
+      }
+      targets.push_back(vds::ControllerTarget{
+          .address = vds::normalize_bluetooth_address(device.address),
+          .name = device.name,
+          .profile = device.profile == VDS_PROFILE_DSE
+                         ? vds::ControllerProfile::Dse
+                         : vds::ControllerProfile::Ds5,
+          .online = device.bluetooth_connected,
+      });
+    }
+  } catch (const std::exception &error) {
+    // Bluetooth radio off or the device query failed; USB targets must stay
+    // discoverable, so degrade to "no Bluetooth devices" instead of failing
+    // the whole list.
+    logger.log(vds::LogScope::Control, vds::LogLevel::Warn,
+               "bluetooth target enumeration failed: " +
+                   std::string(error.what()));
+  }
+  for (const auto &device : vds::win::list_usb_controller_devices()) {
+    if (device.path.empty()) {
       continue;
     }
     targets.push_back(vds::ControllerTarget{
-        .address = vds::normalize_bluetooth_address(device.address),
+        .address = device.path,
         .name = device.name,
         .profile = device.profile == VDS_PROFILE_DSE
                        ? vds::ControllerProfile::Dse
                        : vds::ControllerProfile::Ds5,
-        .online = device.bluetooth_connected,
+        .online = true,
+        .usb = true,
     });
   }
   return targets;
@@ -1949,6 +1996,351 @@ void send_initial_bluetooth_reports(BluetoothTransport &bluetooth,
               "startup mic stream inactive until USB capture opens");
 }
 
+/*
+ * Reads physical DualSense / DualSense Edge identification data over the
+ * Bluetooth HID feature reports, mirroring the parsing used by
+ * https://ds.evua.cc/:
+ *   - 0x20 firmware info: serial parts, hw version (motherboard), fw version
+ *     and update version ("A-xxxx").
+ *   - 0x09 pairing info: controller MAC address.
+ *   - 0x80 -> 0x81 vendor sub-command [1, 19]: 17-byte shell serial.
+ *   - 0x80 -> 0x81 vendor sub-command [21, 5, side] (Edge only): stick module
+ *     lock status.
+ */
+vds::VdsControllerInfo
+read_controller_device_info(BluetoothTransport &bluetooth,
+                            std::uint32_t profile, vds::Logger &logger) {
+  using vds::VdsControllerInfo;
+  const bool edge = profile == VDS_PROFILE_DSE;
+  VdsControllerInfo info;
+  info.model = edge ? "DualSense Edge" : "DualSense";
+  info.connection = "bluetooth";
+
+  const auto safe_read = [&](std::uint8_t report_id)
+      -> std::optional<std::vector<std::uint8_t>> {
+    try {
+      return bluetooth.read_feature_report(report_id);
+    } catch (const std::exception &error) {
+      if (info.error.empty()) {
+        info.error = std::string("report 0x") + hex_u8(report_id) +
+                     ": " + error.what();
+      }
+      logger.log(vds::LogScope::Daemon, vds::LogLevel::Warn,
+                 std::string("controller info report 0x") +
+                     hex_u8(report_id) + " failed: " + error.what());
+      return std::nullopt;
+    }
+  };
+  const auto hex_u32_log = [](std::uint32_t value) {
+    std::string text = "00000000";
+    constexpr char kDigits[] = "0123456789abcdef";
+    for (unsigned index = 0; index < 8; ++index) {
+      text[index] = kDigits[(value >> (28 - index * 4)) & 0x0f];
+    }
+    return text;
+  };
+  // The BT feature SET first uses the protocol checksum; if the device or
+  // Windows HID stack rejects it, retry the exact bytes the WebHID
+  // implementation of ds.evua.cc sends (no checksum appended).
+  const auto write_vendor_set =
+      [&](std::span<const std::uint8_t> request,
+          std::string_view label) -> bool {
+    try {
+      bluetooth.write_feature_report(request);
+      return true;
+    } catch (const std::exception &error) {
+      const DWORD crc_error = GetLastError();
+      if (bluetooth.try_write_feature_report_raw(request)) {
+        logger.log(vds::LogScope::Daemon, vds::LogLevel::Info,
+                   std::string("controller info ") + std::string(label) +
+                       " used raw feature set after crc error=0x" +
+                       hex_u32_log(crc_error));
+        return true;
+      }
+      const DWORD raw_error = GetLastError();
+      if (info.error.empty()) {
+        info.error = std::string(label) + ": " + error.what();
+      }
+      logger.log(
+          vds::LogScope::Daemon, vds::LogLevel::Warn,
+          std::string("controller info ") + std::string(label) +
+              " failed: " + error.what() + " crc_error=0x" +
+              hex_u32_log(crc_error) + " raw_error=0x" +
+              hex_u32_log(raw_error));
+      return false;
+    }
+  };
+
+  if (const auto report = safe_read(vds::kDsFeatureReportFirmwareInfo)) {
+    const std::span<const std::uint8_t> bytes = *report;
+    info.info_read =
+        bytes.size() >= 46 && bytes[0] == vds::kDsFeatureReportFirmwareInfo;
+    if (info.info_read) {
+      info.serial = vds::vds_serial_from_info_report(bytes);
+      info.build_time = vds::vds_build_time_from_info_report(bytes);
+      info.firmware =
+          vds::vds_format_update_version(
+              vds::vds_update_version_from_info_report(bytes));
+      const std::uint32_t fw =
+          vds::vds_fw_version_from_info_report(bytes);
+      info.firmware_version = vds::vds_format_firmware_version(fw);
+      const std::uint32_t hw =
+          vds::vds_hw_version_from_info_report(bytes);
+      info.hardware_version = vds::vds_format_firmware_version(hw);
+      info.hardware_model = vds::vds_hardware_model_name(
+          hw, edge);
+    }
+  }
+
+  if (const auto report = safe_read(vds::kDsFeatureReportPairingInfo)) {
+    info.mac_address = vds::vds_mac_from_pairing_report(*report);
+  }
+
+  {
+    std::array<std::uint8_t, 64> request{};
+    request[0] = vds::kDsVendorSetReport;
+    request[1] = 0x01; // serial sub-command
+    request[2] = 0x13;
+    if (write_vendor_set(request, "vendor serial")) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
+      if (const auto report = safe_read(vds::kDsVendorGetReport)) {
+        const std::string serial =
+            vds::vds_serial_from_vendor_report(*report);
+        if (!serial.empty()) {
+          info.serial = serial;
+        }
+      }
+    }
+  }
+
+  if (edge) {
+    for (const std::uint8_t side : {0, 1}) {
+      std::array<std::uint8_t, 64> request{};
+      request[0] = vds::kDsVendorSetReport;
+      request[1] = 21;
+      request[2] = 5;
+      request[3] = side;
+      if (write_vendor_set(request,
+                           "edge module side=" + std::to_string(side))) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const auto report = safe_read(vds::kDsVendorGetReport);
+        if (report) {
+          const std::string status = vds::vds_module_status(
+              vds::vds_module_status_from_vendor_report(*report));
+          if (side == 0) {
+            info.left_module = status;
+          } else {
+            info.right_module = status;
+          }
+        }
+      }
+    }
+  }
+
+  // The color code lives in the compact shell serial; skip timestamp-style
+  // serials assembled from the 0x20 report parts.
+  if (!info.serial.empty() &&
+      info.serial.find_first_of(" \t\r\n-") == std::string::npos) {
+    info.color_code = vds::vds_controller_color_code(info.serial);
+    info.color_name = vds::vds_controller_color_name(info.serial);
+  }
+  info.is_clone = !info.info_read || info.serial.empty();
+  if (info.info_read && !info.serial.empty() && !info.error.empty()) {
+    info.error.clear();
+  }
+  return info;
+}
+
+/*
+ * Same identification reads over a wired USB HID interface. The 0x80 vendor
+ * SET that Bluetooth rejects (error 0x57) works on USB, so the 17-byte shell
+ * serial and Edge stick module status are actually readable here.
+ */
+vds::VdsControllerInfo
+read_usb_controller_device_info(const std::string &path, std::uint32_t profile,
+                                bool ds4, vds::Logger &logger) {
+  using vds::VdsControllerInfo;
+  const bool edge = profile == VDS_PROFILE_DSE;
+  VdsControllerInfo info;
+  info.model = ds4 ? "DualShock 4" : (edge ? "DualSense Edge" : "DualSense");
+  info.connection = "usb";
+
+  vds::win::UniqueHandle handle(CreateFileA(
+      path.c_str(), GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+  if (!handle) {
+    info.error = "CreateFile failed: " + win32_error_message(GetLastError());
+    return info;
+  }
+
+  USHORT feature_length = 64;
+  PHIDP_PREPARSED_DATA preparsed = nullptr;
+  if (HidD_GetPreparsedData(handle.get(), &preparsed)) {
+    HIDP_CAPS caps{};
+    const NTSTATUS status = HidP_GetCaps(preparsed, &caps);
+    HidD_FreePreparsedData(preparsed);
+    if (status == HIDP_STATUS_SUCCESS && caps.FeatureReportByteLength != 0) {
+      feature_length = caps.FeatureReportByteLength;
+    }
+  }
+
+  const auto safe_read = [&](std::uint8_t report_id)
+      -> std::optional<std::vector<std::uint8_t>> {
+    std::vector<std::uint8_t> buffer(feature_length);
+    buffer[0] = report_id;
+    if (!HidD_GetFeature(handle.get(), buffer.data(),
+                         static_cast<ULONG>(buffer.size()))) {
+      const std::string error =
+          "HidD_GetFeature report=" + std::to_string(report_id) + ": " +
+          win32_error_message(GetLastError());
+      if (info.error.empty()) {
+        info.error = error;
+      }
+      logger.log(vds::LogScope::Daemon, vds::LogLevel::Warn,
+                 "controller usb info report " + std::to_string(report_id) +
+                     " failed: " + error);
+      return std::nullopt;
+    }
+    return buffer;
+  };
+
+  const auto write_vendor_set = [&](std::span<const std::uint8_t> request,
+                                    std::string_view label) -> bool {
+    std::vector<std::uint8_t> buffer(feature_length);
+    std::copy(request.begin(), request.end(), buffer.begin());
+    if (HidD_SetFeature(handle.get(), buffer.data(),
+                        static_cast<ULONG>(buffer.size()))) {
+      return true;
+    }
+    const std::string error =
+        "HidD_SetFeature report=" + std::to_string(request.front()) + ": " +
+        win32_error_message(GetLastError());
+    if (info.error.empty()) {
+      info.error = std::string(label) + ": " + error;
+    }
+    logger.log(vds::LogScope::Daemon, vds::LogLevel::Warn,
+               "controller usb info " + std::string(label) +
+                   " failed: " + error);
+    return false;
+  };
+
+  if (ds4) {
+    // DualShock 4 exposes its firmware date and hardware version through
+    // feature report 0xA3; its serial comes from feature report 0x81.
+    if (const auto report = safe_read(vds::kDs4FeatureReportInfo)) {
+      const std::span<const std::uint8_t> bytes = *report;
+      if (bytes.size() >= 42 && bytes[0] == vds::kDs4FeatureReportInfo) {
+        info.info_read = true;
+        info.build_time = vds::vds_build_time_from_ds4_report(bytes);
+        const std::uint16_t hw_major =
+            vds::vds_ds4_hw_major_from_report(bytes);
+        const std::uint16_t hw_minor =
+            vds::vds_ds4_hw_minor_from_report(bytes);
+        info.hardware_version =
+            vds::hex_u16(hw_major) + ":" + vds::hex_u16(hw_minor);
+        info.hardware_model = vds::vds_ds4_board_model(hw_minor);
+        const std::uint32_t sw_major =
+            vds::vds_ds4_sw_major_from_report(bytes);
+        if (sw_major != 0) {
+          info.firmware_version = vds::vds_format_firmware_version(sw_major);
+        }
+      }
+    }
+    // The DS4 Bluetooth MAC is exposed by feature report 0x12 (used by
+    // DS4Windows and hid-sony) with 0x81 as the older fallback. It is the
+    // de-facto identifier for a DS4; the shell serial is not readable via
+    // HID. Either report carries the 6 address bytes at offset 1 in
+    // reversed order.
+    for (const std::uint8_t report_id :
+         {vds::kDs4FeatureReportPairingInfo, vds::kDsVendorGetReport}) {
+      if (const auto report = safe_read(report_id)) {
+        const std::span<const std::uint8_t> bytes = *report;
+        if (bytes.size() >= 7 && bytes[0] == report_id) {
+          info.mac_address = vds::vds_mac_from_pairing_report(bytes);
+          info.info_read = true;
+          break;
+        }
+      }
+    }
+  } else {
+    if (const auto report = safe_read(vds::kDsFeatureReportFirmwareInfo)) {
+      const std::span<const std::uint8_t> bytes = *report;
+      info.info_read =
+          bytes.size() >= 46 && bytes[0] == vds::kDsFeatureReportFirmwareInfo;
+      if (info.info_read) {
+        info.serial = vds::vds_serial_from_info_report(bytes);
+        info.build_time = vds::vds_build_time_from_info_report(bytes);
+        info.firmware = vds::vds_format_update_version(
+            vds::vds_update_version_from_info_report(bytes));
+        const std::uint32_t fw = vds::vds_fw_version_from_info_report(bytes);
+        info.firmware_version = vds::vds_format_firmware_version(fw);
+        const std::uint32_t hw = vds::vds_hw_version_from_info_report(bytes);
+        info.hardware_version = vds::vds_format_firmware_version(hw);
+        info.hardware_model = vds::vds_hardware_model_name(hw, edge);
+      }
+    }
+
+    if (const auto report = safe_read(vds::kDsFeatureReportPairingInfo)) {
+      info.mac_address = vds::vds_mac_from_pairing_report(*report);
+    }
+
+    {
+      std::array<std::uint8_t, 64> request{};
+      request[0] = vds::kDsVendorSetReport;
+      request[1] = 0x01; // serial sub-command
+      request[2] = 0x13;
+      if (write_vendor_set(request, "vendor serial")) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        if (const auto report = safe_read(vds::kDsVendorGetReport)) {
+          const std::string serial =
+              vds::vds_serial_from_vendor_report(*report);
+          if (!serial.empty()) {
+            info.serial = serial;
+          }
+        }
+      }
+    }
+
+    if (edge) {
+      for (const std::uint8_t side : {0, 1}) {
+        std::array<std::uint8_t, 64> request{};
+        request[0] = vds::kDsVendorSetReport;
+        request[1] = 21;
+        request[2] = 5;
+        request[3] = side;
+        if (write_vendor_set(request,
+                             "edge module side=" + std::to_string(side))) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+          const auto report = safe_read(vds::kDsVendorGetReport);
+          if (report) {
+            const std::string status = vds::vds_module_status(
+                vds::vds_module_status_from_vendor_report(*report));
+            if (side == 0) {
+              info.left_module = status;
+            } else {
+              info.right_module = status;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (!ds4 && !info.serial.empty() &&
+      info.serial.find_first_of(" \t\r\n-") == std::string::npos) {
+    info.color_code = vds::vds_controller_color_code(info.serial);
+    info.color_name = vds::vds_controller_color_name(info.serial);
+  }
+  // A DS4 never exposes its shell serial over HID, so the serial-based
+  // clone heuristic only applies to DualSense / DualSense Edge.
+  info.is_clone = !info.info_read || (!ds4 && info.serial.empty());
+  if (info.info_read && !info.serial.empty() && !info.error.empty()) {
+    info.error.clear();
+  }
+  return info;
+}
+
 void enqueue_injected_audio_chunks(BridgeState &state) {
   std::uint64_t generation = 0;
   std::uint64_t sequence = 0;
@@ -1961,9 +2353,21 @@ void enqueue_injected_audio_chunks(BridgeState &state) {
   const auto snapshot = g_audio_injection_bus.snapshot(
       generation, sequence, max_pending_audio_chunks());
   std::lock_guard guard(state.mutex);
+
+  if (state.audio_injection_wait_for_next_stream &&
+      snapshot.generation == state.audio_injection_generation) {
+    // Consume the cursor without enqueuing. Keeping this suppression for the
+    // whole generation also covers a connected-but-currently-silent loopback
+    // stream that starts publishing again later.
+    state.audio_injection_sequence = snapshot.last_sequence;
+    state.audio_injection_stream_active = false;
+    return;
+  }
+
   const bool generation_changed =
       snapshot.generation != state.audio_injection_generation;
   if (generation_changed) {
+    state.audio_injection_wait_for_next_stream = false;
     state.audio_injection_generation = snapshot.generation;
     state.audio_injection_sequence = 0;
     if (!state.audio_out_stream_active && !state.waveout_active) {
@@ -2647,7 +3051,9 @@ void run_bridge_session(const std::string &device_address,
                         const vds::ControllerConfig *selected_config,
                         vds::Logger &logger,
                         std::atomic_bool *session_stop_requested = nullptr,
-                        const std::atomic_uint32_t *trace_flags = nullptr) {
+                        const std::atomic_uint32_t *trace_flags = nullptr,
+                        std::atomic<std::shared_ptr<const vds::VdsControllerInfo>>
+                            *device_info_out = nullptr) {
   if (selected_config == nullptr) {
     throw std::runtime_error("Windows bridge session requires config");
   }
@@ -2672,6 +3078,18 @@ void run_bridge_session(const std::string &device_address,
       vds::win::usbip::open_virtual_port(profile, selected_config->ports[0],
                                          logger);
   BridgeState state;
+  const AudioInjectionSubscription audio_subscription =
+      g_audio_injection_bus.subscribe();
+  state.audio_injection_generation = audio_subscription.generation;
+  state.audio_injection_sequence = audio_subscription.last_sequence;
+  state.audio_injection_wait_for_next_stream =
+      audio_subscription.wait_for_next_stream;
+  if (audio_subscription.wait_for_next_stream) {
+    logger.log(vds::LogScope::Output, vds::LogLevel::Info,
+               "existing desktop audio haptics stream ignored by new bridge "
+               "generation=" +
+                   std::to_string(audio_subscription.generation));
+  }
   std::mutex bluetooth_mutex;
   UniqueHandle virtual_device_handle = open_device(virtual_port->pipe_path());
   std::atomic_bool bridge_restart_requested = false;
@@ -2701,6 +3119,29 @@ void run_bridge_session(const std::string &device_address,
   } catch (...) {
     stop_startup_monitors();
     throw;
+  }
+  try {
+    const vds::VdsControllerInfo device_info =
+        read_controller_device_info(*bluetooth, profile, logger);
+    if (device_info_out != nullptr) {
+      device_info_out->store(
+          std::make_shared<const vds::VdsControllerInfo>(device_info),
+          std::memory_order_release);
+    }
+    logger.log(
+        vds::LogScope::Daemon, vds::LogLevel::Info,
+        "controller info model=" + device_info.model +
+            " serial=" + device_info.serial +
+            " firmware=" + device_info.firmware +
+            " board=" + device_info.hardware_model +
+            " hw=" + device_info.hardware_version +
+            " color=" + device_info.color_name +
+            " mac=" + device_info.mac_address +
+            " build=" + device_info.build_time +
+            " clone=" + (device_info.is_clone ? "yes" : "no"));
+  } catch (const std::exception &error) {
+    logger.log(vds::LogScope::Daemon, vds::LogLevel::Warn,
+               "controller info read failed: " + std::string(error.what()));
   }
   if (bridge_restart_requested.load()) {
     stop_startup_monitors();
@@ -2971,6 +3412,7 @@ struct BridgeWorker {
   unsigned port = 0;
   vds::ControllerProfile profile = vds::ControllerProfile::Unspecified;
   std::string last_error;
+  std::atomic<std::shared_ptr<const vds::VdsControllerInfo>> device_info;
   UniqueHandle done_event;
   std::thread thread;
   std::atomic_bool stop_requested = false;
@@ -3957,6 +4399,61 @@ handle_effects_control_command(const std::string &request,
   return format_effects_reply(true, "", effects);
 }
 
+std::optional<std::string>
+handle_device_info_control_command(
+    const std::string &command,
+    const std::vector<std::unique_ptr<BridgeWorker>> &workers,
+    vds::Logger &logger) {
+  if (vds::trim_command(command) != "{\"command\":\"device-info\"}") {
+    return std::nullopt;
+  }
+
+  std::string reply = "{\"OK\":true,\"controllers\":[";
+  bool first = true;
+  for (const auto &worker : workers) {
+    const std::shared_ptr<const vds::VdsControllerInfo> info =
+        worker->device_info.load(std::memory_order_acquire);
+    if (!worker_is_connected(*worker) || !info) {
+      continue;
+    }
+    if (!first) {
+      reply += ',';
+    }
+    first = false;
+    reply += "{";
+    reply += vds::jsonl_string_field("address", worker->address);
+    reply += ',';
+    reply += vds::jsonl_string_field(
+        "port", std::to_string(worker->port));
+    reply += ',';
+    reply += "\"info\":";
+    reply += vds::vds_controller_info_object(*info);
+    reply += '}';
+  }
+  for (const auto &device : vds::win::list_usb_controller_devices()) {
+    if (device.path.empty()) {
+      continue;
+    }
+    if (!first) {
+      reply += ',';
+    }
+    first = false;
+    const vds::VdsControllerInfo info =
+        read_usb_controller_device_info(device.path, device.profile,
+                                        device.ds4, logger);
+    reply += "{";
+    reply += vds::jsonl_string_field("address", device.path);
+    reply += ',';
+    reply += vds::jsonl_string_field("port", "usb");
+    reply += ',';
+    reply += "\"info\":";
+    reply += vds::vds_controller_info_object(info);
+    reply += '}';
+  }
+  reply += "]}\n";
+  return reply;
+}
+
 std::string handle_supervisor_control_command(
     const std::string &command,
     const std::vector<std::unique_ptr<BridgeWorker>> &workers,
@@ -3968,6 +4465,10 @@ std::string handle_supervisor_control_command(
   }
   if (const auto reply =
           handle_effects_control_command(command, db_path, logger)) {
+    return *reply;
+  }
+  if (const auto reply =
+          handle_device_info_control_command(command, workers, logger)) {
     return *reply;
   }
   std::vector<vds::VdsdControlControllerStatus> controller_statuses;
@@ -4009,7 +4510,7 @@ std::string handle_supervisor_control_command(
 
   return vds::handle_vdsd_control_command(
       command, db_path, controller_statuses, port_statuses,
-      [] { return list_windows_controller_targets(); }, trace_flags,
+      [&logger] { return list_windows_controller_targets(logger); }, trace_flags,
       reload_requested, logger);
 }
 
@@ -4019,7 +4520,9 @@ void run_configured_bridge_worker(vds::ControllerConfig config,
                                   std::atomic_bool &stop_requested,
                                   std::atomic_bool &done,
                                   std::string &last_error,
-                                  const std::atomic_uint32_t &trace_flags) {
+                                  const std::atomic_uint32_t &trace_flags,
+                                  std::atomic<std::shared_ptr<const vds::VdsControllerInfo>>
+                                      *device_info_out) {
   try {
     if (config.ports.size() != 1) {
       throw std::runtime_error("bridge worker requires one reserved port");
@@ -4027,7 +4530,7 @@ void run_configured_bridge_worker(vds::ControllerConfig config,
     const std::string virtual_device =
         vds::win::usbip::endpoint_for_port(config.ports[0]);
     run_bridge_session(device_address, virtual_device, &config, logger,
-                       &stop_requested, &trace_flags);
+                       &stop_requested, &trace_flags, device_info_out);
     if (!g_stop_requested && !stop_requested.load()) {
       last_error = "bridge session ended";
       logger.log(vds::LogScope::Daemon, vds::LogLevel::Warn,
@@ -4298,7 +4801,8 @@ void run_bridge_supervisor(const Options &options, vds::Logger &logger) {
             run_configured_bridge_worker(worker_config, device_address, logger,
                                          worker_ptr->stop_requested,
                                          worker_ptr->done,
-                                         worker_ptr->last_error, trace_flags);
+                                         worker_ptr->last_error, trace_flags,
+                                         &worker_ptr->device_info);
             SetEvent(worker_ptr->done_event.get());
           });
           logger.log(

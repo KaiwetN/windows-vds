@@ -33,6 +33,7 @@ struct ControllerTarget {
   std::string name;
   ControllerProfile profile = ControllerProfile::Unspecified;
   bool online = false;
+  bool usb = false;
 };
 
 struct ConfigDb {

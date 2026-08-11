@@ -332,7 +332,14 @@ select_controller_config_port(const ControllerConfig &config,
 const ControllerConfig *
 find_controller_config_by_address(const ConfigDb &db,
                                   std::string_view address) {
-  const std::string normalized = normalize_bluetooth_address(address);
+  std::string normalized(address);
+  if (normalized.size() == 17) {
+    try {
+      normalized = normalize_bluetooth_address(normalized);
+    } catch (const std::exception &) {
+      // Not a Bluetooth address (e.g. a wired USB HID path); compare as-is.
+    }
+  }
   for (const auto &config : db.controllers) {
     if (config.address == normalized) {
       return &config;

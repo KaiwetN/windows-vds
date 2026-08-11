@@ -426,6 +426,8 @@ std::string format_control_target_jsonl(const ControllerTarget &target,
   line += jsonl_bool_field("online", target.online);
   line += ',';
   line += jsonl_bool_field("registered", registered);
+  line += ',';
+  line += jsonl_bool_field("usb", target.usb);
   line += "}\n";
   return line;
 }
@@ -540,8 +542,17 @@ std::string handle_attach_control_request(
       .ports = {},
   };
   try {
-    const std::string address = normalize_bluetooth_address(
-        require_jsonl_string(fields, "address", context));
+    const std::string raw_address =
+        require_jsonl_string(fields, "address", context);
+    if (raw_address.find('\\') != std::string::npos ||
+        raw_address.find('#') != std::string::npos) {
+      const std::string error =
+          "USB controllers are already wired and cannot be bridged";
+      logger.log(vds::LogScope::Control, LogLevel::Warn,
+                 "attach rejected " + error + ": " + raw_address);
+      return format_control_attach_reply(false, error, config);
+    }
+    const std::string address = normalize_bluetooth_address(raw_address);
     const ConfigDb current_db = load_config_db(db_path);
     if (const ControllerConfig *registered =
             find_controller_config_by_address(current_db, address)) {

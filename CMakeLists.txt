@@ -30,6 +30,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(MSVC)
+  add_compile_options(/utf-8)
+endif()
+
 set(VDS_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
 set(VDS_BUILD_INFO_HEADER ${VDS_GENERATED_DIR}/vds_build_info.hh)
 set(VDS_BUILD_INFO_SCRIPT
@@ -55,6 +59,11 @@ target_include_directories(vds_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 add_library(jsonl OBJECT src/jsonl.cc)
 target_include_directories(jsonl PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
+add_library(vds_device_info OBJECT src/vds_device_info.cc)
+target_include_directories(
+  vds_device_info PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(vds_device_info PUBLIC jsonl)
 
 if(WIN32)
   add_library(vds_win32 OBJECT src/platform/win32/vds_win32.cc)
@@ -125,6 +134,7 @@ if(WIN32)
             vds_bt
             vds_common
             vds_config
+            vds_device_info
             vds_hidhide
             vds_log
             vds_io

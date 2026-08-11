@@ -1,7 +1,7 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Globalization;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -70,6 +70,8 @@ public sealed class VdsBackend
             {
                 Name = string.IsNullOrWhiteSpace(target.Name) ? "DualSense" : target.Name,
                 Address = target.Address,
+                IsUsb = target.Usb,
+                IsVirtual = target.Usb && IsVirtualUsbDevice(target.Address),
                 Online = target.Online,
                 Registered = target.Registered || status is not null,
                 Connected = status?.Connected ?? false,
@@ -90,10 +92,58 @@ public sealed class VdsBackend
                 Profile = status.Profile
             });
         }
+        // Hide devices that are not currently reachable: Bluetooth targets
+        // that are not connected, and registered entries with no live
+        // bridge. USB targets are always present and therefore online.
+        rows.RemoveAll(row => !row.Online && !row.Connected);
+        try
+        {
+            var infoReply = await GetDeviceInfoAsync(vdsctlPath, cancellationToken);
+            if (infoReply?.Ok == true)
+            {
+                var infoByAddress = infoReply.Controllers.ToDictionary(
+                    item => item.Address,
+                    StringComparer.OrdinalIgnoreCase);
+                foreach (var row in rows)
+                {
+                    if (!infoByAddress.TryGetValue(row.Address, out var info))
+                    {
+                        continue;
+                    }
+                    var rawSerial = info.Info.Serial;
+                    row.Serial = string.IsNullOrWhiteSpace(rawSerial) ||
+                                 rawSerial.Contains(' ')
+                        ? "—"
+                        : rawSerial;
+                    row.BuildTime = info.Info.BuildTime;
+                    row.Firmware = info.Info.Firmware;
+                    row.Board = string.IsNullOrWhiteSpace(info.Info.HardwareModel)
+                        ? info.Info.HardwareVersion
+                        : info.Info.HardwareModel;
+                    row.ColorName = info.Info.ColorName;
+                    row.MacAddress = info.Info.MacAddress;
+                }
+            }
+        }
+        catch
+        {
+            // Device info is best-effort; the controller list still works.
+        }
         return rows.OrderByDescending(item => item.Connected)
             .ThenByDescending(item => item.Online)
             .ThenBy(item => item.Address)
             .ToArray();
+    }
+
+    public async Task<DeviceInfoReply?> GetDeviceInfoAsync(
+        string vdsctlPath,
+        CancellationToken cancellationToken = default)
+    {
+        var output = (await RunAsync(
+            vdsctlPath,
+            ["info"],
+            cancellationToken)).StandardOutput;
+        return ParseJsonLines<DeviceInfoReply>(output).SingleOrDefault();
     }
 
     public async Task AttachAsync(
@@ -486,6 +536,269 @@ public sealed class VdsBackend
         public uint ServiceSpecificExitCode;
         public uint CheckPoint;
         public uint WaitHint;
+    }
+
+    // --- USBip virtual-device detection -----------------------------------
+    // vDS exposes a Bluetooth controller to games as a virtual USB device via
+    // the local USBip stack. Such devices hang off the "USBip 3.X Emulated
+    // Host Controller" in the PnP tree, which a real USB cable never does.
+    // Walk each HID interface's parent chain to distinguish the two.
+
+    private const uint DigcfPresent = 0x00000002;
+    private const uint DigcfDeviceInterface = 0x00000010;
+
+    private static readonly Guid DevpKeyDeviceParent =
+        new("4340a6c5-93fa-4706-972c-7b648008a5a7");
+    private static readonly Guid DevpKeyDeviceDriverDesc =
+        new("a45c254e-df1c-4efd-8020-67d146a850e0");
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct DevPropKey
+    {
+        public Guid Fmtid;
+        public uint Pid;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SpDeviceInterfaceData
+    {
+        public uint CbSize;
+        public Guid InterfaceClassGuid;
+        public uint Flags;
+        public IntPtr Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SpDevInfoData
+    {
+        public uint CbSize;
+        public Guid ClassGuid;
+        public uint DevInst;
+        public IntPtr Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    private struct SpDeviceInterfaceDetailDataA
+    {
+        public uint CbSize;
+        public byte DevicePath;
+    }
+
+    [DllImport("hid.dll")]
+    private static extern void HidD_GetHidGuid(out Guid hidGuid);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern IntPtr SetupDiGetClassDevsA(
+        ref Guid classGuid,
+        string? enumerator,
+        IntPtr hwndParent,
+        uint flags);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiEnumDeviceInterfaces(
+        IntPtr deviceInfoSet,
+        IntPtr deviceInfoData,
+        ref Guid interfaceClassGuid,
+        uint memberIndex,
+        ref SpDeviceInterfaceData deviceInterfaceData);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiGetDeviceInterfaceDetailA(
+        IntPtr deviceInfoSet,
+        ref SpDeviceInterfaceData deviceInterfaceData,
+        IntPtr deviceInterfaceDetailData,
+        uint deviceInterfaceDetailDataSize,
+        out uint requiredSize,
+        ref SpDevInfoData deviceInfoData);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiOpenDeviceInfoW(
+        IntPtr deviceInfoSet,
+        string deviceInstanceId,
+        IntPtr hwndParent,
+        uint flags,
+        ref SpDevInfoData deviceInfoData);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiGetDevicePropertyW(
+        IntPtr deviceInfoSet,
+        ref SpDevInfoData deviceInfoData,
+        ref DevPropKey propertyKey,
+        out uint propertyType,
+        IntPtr propertyBuffer,
+        uint propertyBufferSize,
+        out uint requiredSize,
+        uint flags);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
+
+    private static bool IsVirtualUsbDevice(string deviceInterfacePath)
+    {
+        Guid hidGuid;
+        HidD_GetHidGuid(out hidGuid);
+        IntPtr deviceInfoSet = SetupDiGetClassDevsA(
+            ref hidGuid, null, IntPtr.Zero, DigcfPresent | DigcfDeviceInterface);
+        if (deviceInfoSet == IntPtr.Zero || deviceInfoSet == new IntPtr(-1))
+        {
+            return false;
+        }
+
+        try
+        {
+            for (uint index = 0; ; index++)
+            {
+                var interfaceData = new SpDeviceInterfaceData
+                {
+                    CbSize = (uint)Marshal.SizeOf<SpDeviceInterfaceData>()
+                };
+                if (!SetupDiEnumDeviceInterfaces(
+                        deviceInfoSet, IntPtr.Zero, ref hidGuid, index,
+                        ref interfaceData))
+                {
+                    break;
+                }
+
+                uint required = 0;
+                var unusedInfo = new SpDevInfoData
+                {
+                    CbSize = (uint)Marshal.SizeOf<SpDevInfoData>()
+                };
+                SetupDiGetDeviceInterfaceDetailA(
+                    deviceInfoSet, ref interfaceData, IntPtr.Zero, 0,
+                    out required, ref unusedInfo);
+                if (required == 0)
+                {
+                    continue;
+                }
+
+                IntPtr detail = Marshal.AllocHGlobal((int)required);
+                try
+                {
+                    // ANSI detail layout: DWORD cbSize followed by the
+                    // NULL-terminated device path string.
+                    Marshal.WriteInt32(
+                        detail,
+                        Marshal.SizeOf<SpDeviceInterfaceDetailDataA>());
+                    var deviceInfo = new SpDevInfoData
+                    {
+                        CbSize = (uint)Marshal.SizeOf<SpDevInfoData>()
+                    };
+                    if (!SetupDiGetDeviceInterfaceDetailA(
+                            deviceInfoSet, ref interfaceData, detail,
+                            required, out _, ref deviceInfo))
+                    {
+                        continue;
+                    }
+
+                    string? path = Marshal.PtrToStringAnsi(
+                        IntPtr.Add(
+                            detail,
+                            (int)Marshal.OffsetOf<
+                                SpDeviceInterfaceDetailDataA>(
+                                "DevicePath")));
+                    if (string.IsNullOrEmpty(path) ||
+                        !string.Equals(
+                            path, deviceInterfacePath,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    return HasUsbipAncestor(deviceInfoSet, deviceInfo);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(detail);
+                }
+            }
+        }
+        finally
+        {
+            SetupDiDestroyDeviceInfoList(deviceInfoSet);
+        }
+        return false;
+    }
+
+    private static bool HasUsbipAncestor(
+        IntPtr deviceInfoSet, SpDevInfoData deviceInfo)
+    {
+        var parentKey = new DevPropKey
+        {
+            Fmtid = DevpKeyDeviceParent,
+            Pid = 8
+        };
+        var driverDescKey = new DevPropKey
+        {
+            Fmtid = DevpKeyDeviceDriverDesc,
+            Pid = 2
+        };
+
+        for (var depth = 0; depth < 12; depth++)
+        {
+            string? driverDesc = GetDevicePropertyString(
+                deviceInfoSet, ref deviceInfo, ref driverDescKey);
+            if (driverDesc?.Contains(
+                    "USBip", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                return true;
+            }
+
+            string? parent = GetDevicePropertyString(
+                deviceInfoSet, ref deviceInfo, ref parentKey);
+            if (string.IsNullOrEmpty(parent))
+            {
+                return false;
+            }
+
+            var parentInfo = new SpDevInfoData
+            {
+                CbSize = (uint)Marshal.SizeOf<SpDevInfoData>()
+            };
+            if (!SetupDiOpenDeviceInfoW(
+                    deviceInfoSet, parent, IntPtr.Zero, 0, ref parentInfo))
+            {
+                return false;
+            }
+            deviceInfo = parentInfo;
+        }
+        return false;
+    }
+
+    private static string? GetDevicePropertyString(
+        IntPtr deviceInfoSet,
+        ref SpDevInfoData deviceInfo,
+        ref DevPropKey key)
+    {
+        uint type;
+        uint required;
+        SetupDiGetDevicePropertyW(
+            deviceInfoSet, ref deviceInfo, ref key, out type,
+            IntPtr.Zero, 0, out required, 0);
+        if (required == 0 || required > 4096)
+        {
+            return null;
+        }
+
+        IntPtr buffer = Marshal.AllocHGlobal((int)required);
+        try
+        {
+            if (!SetupDiGetDevicePropertyW(
+                    deviceInfoSet, ref deviceInfo, ref key, out type,
+                    buffer, required, out _, 0))
+            {
+                return null;
+            }
+            return Marshal.PtrToStringUni(buffer);
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     private sealed record ProcessResult(int ExitCode, string StandardOutput, string StandardError);

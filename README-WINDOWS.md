@@ -137,3 +137,21 @@ PowerShell session:
 ```powershell
 cmake --build build\windows --target uninstall
 ```
+
+## Reading controller identity
+
+When a bridge is active, `vdsctl info` reads the physical controller's
+identification over the Bluetooth HID feature reports (the same data shown by
+websites such as https://ds.evua.cc/):
+
+```powershell
+vdsctl info
+```
+
+The daemon reads this once per bridge startup and caches it, so the output
+includes the model, shell serial number, firmware update version (`A-xxxx`),
+main firmware version, motherboard model (`HMB-010` / `BDM-xxx` / `HDM-010`),
+production time, color code/name, controller MAC address and, for DualSense
+Edge, the stick module lock status. The same information is written to the
+daemon log as a `controller info` line and is displayed by the control center
+in the controller grid.

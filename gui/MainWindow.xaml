@@ -119,6 +119,42 @@
             <Setter Property="Background" Value="#FDECEC" />
             <Setter Property="Foreground" Value="#B42318" />
         </Style>
+        <!--
+            Left navigation tab. A checked RadioButton is the selected page;
+            its background flips to the accent colour so the current tab is
+            obvious at a glance.
+        -->
+        <Style x:Key="NavTab" TargetType="RadioButton">
+            <Setter Property="FontFamily" Value="{StaticResource UiFont}" />
+            <Setter Property="FontSize" Value="14" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="#4A5A73" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Margin" Value="0,3" />
+            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="TabBg" Background="Transparent"
+                                CornerRadius="10" Padding="15,11">
+                            <ContentPresenter HorizontalAlignment="Left"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="TabBg" Property="Background"
+                                        Value="#EEF2F7" />
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="TabBg" Property="Background"
+                                        Value="#2563EB" />
+                                <Setter Property="Foreground" Value="White" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
         <Style x:Key="StatusPill" TargetType="Border">
             <Setter Property="CornerRadius" Value="6" />
             <Setter Property="Padding" Value="10,5" />
@@ -144,6 +180,7 @@
             <Setter Property="CanUserAddRows" Value="False" />
             <Setter Property="CanUserDeleteRows" Value="False" />
             <Setter Property="CanUserResizeRows" Value="False" />
+            <Setter Property="CanUserResizeColumns" Value="True" />
             <Setter Property="IsReadOnly" Value="True" />
             <Setter Property="SelectionMode" Value="Single" />
             <Setter Property="SelectionUnit" Value="FullRow" />
@@ -154,7 +191,7 @@
             <Setter Property="Background" Value="#F8FAFC" />
             <Setter Property="Foreground" Value="#667085" />
             <Setter Property="FontWeight" Value="SemiBold" />
-            <Setter Property="BorderThickness" Value="0,0,0,1" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
             <Setter Property="BorderBrush" Value="#E7EBF1" />
             <Setter Property="Padding" Value="12,0" />
             <!-- Headers follow the centred cell content below them. -->
@@ -226,18 +263,46 @@
 
         <Grid Grid.Row="1" Margin="16,14,16,12">
             <Grid.ColumnDefinitions>
-                <!--
-                    The detail column is fixed rather than star-sized: a star
-                    column grows past its share when a child's minimum desired
-                    width demands it, and the controller DataGrid did exactly
-                    that, squeezing this column until its content was clipped
-                    by the ScrollViewer.
-                -->
-                <ColumnDefinition Width="*" MinWidth="420" />
+                <ColumnDefinition Width="204" />
                 <ColumnDefinition Width="14" />
-                <ColumnDefinition Width="446" />
+                <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
-            <Grid Grid.Column="0">
+
+            <Border Grid.Column="0" Style="{StaticResource CardStyle}" Padding="0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+                    <TextBlock Text="功能" FontSize="12" FontWeight="SemiBold"
+                               Foreground="#98A2B3" Margin="20,20,20,10" />
+                    <StackPanel Grid.Row="1" Margin="12,0,12,16">
+                        <RadioButton x:Name="TabControllers" GroupName="Tabs"
+                                     Style="{StaticResource NavTab}" IsChecked="True"
+                                     Content="手柄管理" />
+                        <RadioButton x:Name="TabQuickActions" GroupName="Tabs"
+                                     Style="{StaticResource NavTab}" Content="快速操作" />
+                        <RadioButton x:Name="TabAudioHaptics" GroupName="Tabs"
+                                     Style="{StaticResource NavTab}" Content="桌面音频触觉" />
+                        <RadioButton x:Name="TabEffects" GroupName="Tabs"
+                                     Style="{StaticResource NavTab}" Content="扳机与灯效" />
+                        <RadioButton x:Name="TabAudioBuffer" GroupName="Tabs"
+                                     Style="{StaticResource NavTab}" Content="音频 / 震动缓冲" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <Grid Grid.Column="2" x:Name="ControllersPanel">
+                <Grid.Style>
+                    <Style TargetType="Grid">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsChecked, ElementName=TabControllers}"
+                                         Value="False">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Grid.Style>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="14" />
@@ -252,7 +317,7 @@
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <Border Grid.Row="0" Style="{StaticResource CardStyle}">
+                <Border Grid.Row="0" Style="{StaticResource CardStyle}" Padding="18,12">
                     <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="*" />
@@ -260,34 +325,58 @@
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-                        <StackPanel Grid.Column="0">
-                            <TextBlock Text="桥接服务" Foreground="#667085" FontSize="12" />
-                            <Border x:Name="ServicePill" Style="{StaticResource StatusPill}"
-                                    HorizontalAlignment="Left" Margin="0,8,0,0">
+                        <Grid Grid.Column="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="桥接服务" Foreground="#667085" FontSize="12"
+                                       VerticalAlignment="Center" />
+                            <Border x:Name="ServicePill" Grid.Column="1"
+                                    Style="{StaticResource StatusPill}"
+                                    HorizontalAlignment="Left" Margin="10,0,0,0">
                                 <TextBlock x:Name="ServiceStatusText" Text="检查中" FontWeight="SemiBold" />
                             </Border>
-                        </StackPanel>
-                        <StackPanel Grid.Column="1">
-                            <TextBlock Text="USB/IP 驱动" Foreground="#667085" FontSize="12" />
-                            <Border x:Name="UsbipPill" Style="{StaticResource StatusPill}"
-                                    HorizontalAlignment="Left" Margin="0,8,0,0">
+                        </Grid>
+                        <Grid Grid.Column="1">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="USB/IP 驱动" Foreground="#667085" FontSize="12"
+                                       VerticalAlignment="Center" />
+                            <Border x:Name="UsbipPill" Grid.Column="1"
+                                    Style="{StaticResource StatusPill}"
+                                    HorizontalAlignment="Left" Margin="10,0,0,0">
                                 <TextBlock x:Name="UsbipStatusText" Text="检查中" FontWeight="SemiBold" />
                             </Border>
-                        </StackPanel>
-                        <StackPanel Grid.Column="2">
-                            <TextBlock Text="HidHide" Foreground="#667085" FontSize="12" />
-                            <Border x:Name="HidHidePill" Style="{StaticResource StatusPill}"
-                                    HorizontalAlignment="Left" Margin="0,8,0,0">
+                        </Grid>
+                        <Grid Grid.Column="2">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="HidHide" Foreground="#667085" FontSize="12"
+                                       VerticalAlignment="Center" />
+                            <Border x:Name="HidHidePill" Grid.Column="1"
+                                    Style="{StaticResource StatusPill}"
+                                    HorizontalAlignment="Left" Margin="10,0,0,0">
                                 <TextBlock x:Name="HidHideStatusText" Text="检查中" FontWeight="SemiBold" />
                             </Border>
-                        </StackPanel>
-                        <StackPanel Grid.Column="3">
-                            <TextBlock Text="核心版本" Foreground="#667085" FontSize="12" />
-                            <Border x:Name="CorePill" Style="{StaticResource StatusPill}"
-                                    HorizontalAlignment="Left" Margin="0,8,0,0">
+                        </Grid>
+                        <Grid Grid.Column="3">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="核心版本" Foreground="#667085" FontSize="12"
+                                       VerticalAlignment="Center" />
+                            <Border x:Name="CorePill" Grid.Column="1"
+                                    Style="{StaticResource StatusPill}"
+                                    HorizontalAlignment="Left" Margin="10,0,0,0">
                                 <TextBlock x:Name="CoreStatusText" Text="检查中" FontWeight="SemiBold" />
                             </Border>
-                        </StackPanel>
+                        </Grid>
                     </Grid>
                 </Border>
 
@@ -314,7 +403,7 @@
                         </Grid>
                         <Grid Grid.Row="1">
                             <DataGrid x:Name="ControllerGrid"
-                                      MinHeight="112" MaxHeight="304"
+                                      MinHeight="112" MaxHeight="560"
                                       ItemsSource="{Binding Controllers}"
                                       SelectionChanged="ControllerGrid_SelectionChanged">
                                 <DataGrid.Columns>
@@ -325,26 +414,40 @@
                                             </Style>
                                         </DataGridTextColumn.ElementStyle>
                                     </DataGridTextColumn>
-                                    <DataGridTextColumn Header="蓝牙地址" Binding="{Binding Address}" Width="1.5*" MinWidth="150"
+                                    <DataGridTextColumn Header="连接" Binding="{Binding ConnectionDisplay}" Width="1.2*" MinWidth="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
+                                                <Setter Property="ToolTip" Value="{Binding Address}" />
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="序列号" Binding="{Binding Serial}" Width="1.3*" MinWidth="120">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
+                                                <Setter Property="ToolTip" Value="{Binding Serial}" />
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="蓝牙地址" Binding="{Binding MacAddress}" Width="1.3*" MinWidth="140">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
+                                                <Setter Property="ToolTip" Value="{Binding MacAddress}" />
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="固件日期" Binding="{Binding BuildTime}" Width="1.4*" MinWidth="140">
+                                        <DataGridTextColumn.ElementStyle>
+                                            <Style TargetType="TextBlock" BasedOn="{StaticResource GridCellText}">
+                                                <Setter Property="ToolTip" Value="{Binding BuildTime}" />
+                                            </Style>
+                                        </DataGridTextColumn.ElementStyle>
+                                    </DataGridTextColumn>
+                                    <DataGridTextColumn Header="主板" Binding="{Binding Board}" Width="0.7*" MinWidth="80"
                                                         ElementStyle="{StaticResource GridCellText}" />
-                                    <DataGridTemplateColumn Header="蓝牙" Width="0.8*">
-                                        <DataGridTemplateColumn.CellTemplate>
-                                            <DataTemplate>
-                                                <Border x:Name="State" CornerRadius="6" Padding="9,4"
-                                                        HorizontalAlignment="Center" VerticalAlignment="Center"
-                                                        Background="#FEE2E2">
-                                                    <TextBlock x:Name="StateText" Text="{Binding BluetoothStatus}" Foreground="#B42318"
-                                                               FontSize="12" FontWeight="SemiBold" />
-                                                </Border>
-                                                <DataTemplate.Triggers>
-                                                    <DataTrigger Binding="{Binding Online}" Value="True">
-                                                        <Setter TargetName="State" Property="Background" Value="#DCFCE7" />
-                                                        <Setter TargetName="StateText" Property="Foreground" Value="#16794B" />
-                                                    </DataTrigger>
-                                                </DataTemplate.Triggers>
-                                            </DataTemplate>
-                                        </DataGridTemplateColumn.CellTemplate>
-                                    </DataGridTemplateColumn>
+                                    <DataGridTextColumn Header="固件" Binding="{Binding Firmware}" Width="0.7*" MinWidth="80"
+                                                        ElementStyle="{StaticResource GridCellText}" />
+                                    <DataGridTextColumn Header="颜色" Binding="{Binding ColorName}" Width="1*" MinWidth="90"
+                                                        ElementStyle="{StaticResource GridCellText}" />
                                     <DataGridTextColumn Header="注册" Binding="{Binding RegistrationStatus}" Width="0.8*"
                                                         ElementStyle="{StaticResource GridCellText}" />
                                     <DataGridTemplateColumn Header="虚拟 USB" Width="1*">
@@ -462,8 +565,19 @@
                 </Border>
             </Grid>
 
-            <ScrollViewer Grid.Column="2" VerticalScrollBarVisibility="Auto"
+            <ScrollViewer Grid.Column="2" x:Name="QuickActionsPanel"
+                          VerticalScrollBarVisibility="Auto"
                           HorizontalScrollBarVisibility="Disabled">
+                <ScrollViewer.Style>
+                    <Style TargetType="ScrollViewer">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsChecked, ElementName=TabQuickActions}"
+                                         Value="False">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ScrollViewer.Style>
               <StackPanel Margin="0,0,4,0">
                 <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
@@ -480,10 +594,32 @@
                                 Click="OpenLog_Click" />
                     </StackPanel>
                 </Border>
+              </StackPanel>
+            </ScrollViewer>
 
+            <ScrollViewer Grid.Column="2" x:Name="AudioHapticsPanel"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <ScrollViewer.Style>
+                    <Style TargetType="ScrollViewer">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsChecked, ElementName=TabAudioHaptics}"
+                                         Value="False">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ScrollViewer.Style>
+              <StackPanel Margin="0,0,4,0">
                 <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0"
                         Background="#F4F8FF" BorderBrush="#CFE0FF">
-                    <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="18" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Grid.Column="0">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -534,6 +670,51 @@
                         <TextBlock Text="捕获设备" Foreground="{StaticResource TextTertiary}" FontSize="12" Margin="0,14,0,4" />
                         <ComboBox x:Name="AudioHapticsDeviceCombo" DisplayMemberPath="DisplayName"
                                   SelectedValuePath="Id" SelectionChanged="AudioHapticsDevice_SelectionChanged" />
+                        <TextBlock Text="输出到手柄" Foreground="{StaticResource TextTertiary}" FontSize="12" Margin="0,12,0,4" />
+                        <ComboBox x:Name="AudioHapticsTargetCombo" DisplayMemberPath="DisplayName"
+                                  SelectionChanged="AudioHapticsTarget_SelectionChanged" />
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="USB 输出延迟" Foreground="#344054" FontSize="12" />
+                            <TextBlock x:Name="AudioHapticsUsbLatencyText" Grid.Column="1"
+                                       Foreground="#2563EB" FontSize="12" />
+                        </Grid>
+                        <Slider x:Name="AudioHapticsUsbLatencySlider" Minimum="30" Maximum="300"
+                                TickFrequency="10" ValueChanged="AudioHapticsSetting_ValueChanged" />
+                        <TextBlock Text="有线 DualSense / DS4 的 WASAPI 输出缓冲；数值越小延迟越低，过低可能出现断续。"
+                                   TextWrapping="Wrap" Foreground="#5D6B80" FontSize="12"
+                                   LineHeight="18" Margin="0,4,0,0" />
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="采集缓冲" Foreground="#344054" FontSize="12" />
+                            <TextBlock x:Name="AudioHapticsCaptureLatencyText" Grid.Column="1"
+                                       Foreground="#2563EB" FontSize="12" />
+                        </Grid>
+                        <Slider x:Name="AudioHapticsCaptureLatencySlider" Minimum="10" Maximum="200"
+                                TickFrequency="10" ValueChanged="AudioHapticsSetting_ValueChanged" />
+                        <TextBlock Text="桌面音频采集的 WASAPI 缓冲；越小越跟手，过小可能导致采集丢块。"
+                                   TextWrapping="Wrap" Foreground="#5D6B80" FontSize="12"
+                                   LineHeight="18" Margin="0,4,0,0" />
+                        <Grid Margin="0,12,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="播放队列" Foreground="#344054" FontSize="12" />
+                            <TextBlock x:Name="AudioHapticsPlaybackQueueText" Grid.Column="1"
+                                       Foreground="#2563EB" FontSize="12" />
+                        </Grid>
+                        <Slider x:Name="AudioHapticsPlaybackQueueSlider" Minimum="20" Maximum="300"
+                                TickFrequency="10" ValueChanged="AudioHapticsSetting_ValueChanged" />
+                        <TextBlock Text="USB 扬声器/音圈播放队列；给采集与输出时钟漂移留缓冲，越小延迟越低。"
+                                   TextWrapping="Wrap" Foreground="#5D6B80" FontSize="12"
+                                   LineHeight="18" Margin="0,4,0,0" />
                         <TextBlock Text="触觉输出方式" Foreground="{StaticResource TextTertiary}" FontSize="12" Margin="0,12,0,4" />
                         <ComboBox x:Name="AudioHapticsModeCombo" SelectionChanged="AudioHapticsMode_SelectionChanged">
                             <ComboBoxItem Tag="native" Content="原生音圈波形（0x36）" />
@@ -557,7 +738,21 @@
                             <Slider x:Name="AudioHapticsSpeakerVolumeSlider" Minimum="0" Maximum="100"
                                     TickFrequency="5" Margin="0,6,0,0"
                                     ValueChanged="AudioHapticsSetting_ValueChanged" />
-                            <TextBlock Text="需要「原生音圈波形」模式；插入耳机后自动改走耳机口。"
+                            <Grid Margin="0,10,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="扬声器增益（preamp）" Foreground="#344054" FontSize="12" />
+                                <TextBlock x:Name="AudioHapticsSpeakerPreampText" Grid.Column="1"
+                                           Foreground="#2563EB" FontSize="12" />
+                            </Grid>
+                            <Slider x:Name="AudioHapticsSpeakerPreampSlider" Minimum="0" Maximum="7"
+                                    TickFrequency="1" Margin="0,6,0,0"
+                                    ValueChanged="AudioHapticsSetting_ValueChanged" />
+                            <TextBlock Text="蓝牙桥接需要「原生音圈波形」模式；USB 直连（DualSense / DS4）直接通过音频端点播放，插入耳机后自动改走耳机口。"
+                                       TextWrapping="Wrap" Foreground="#5D6B80" FontSize="12" Margin="0,4,0,0" />
+                            <TextBlock Text="preamp 仅对 USB DualSense 生效（HID audio_control2，0-7，数值 2 约等于 +6dB）；调大可增响，但过高会削波发炒豆音。"
                                        TextWrapping="Wrap" Foreground="#5D6B80" FontSize="12" Margin="0,4,0,0" />
                         </StackPanel>
 
@@ -576,6 +771,8 @@
                             </StackPanel>
                         </Border>
 
+                        </StackPanel>
+                        <StackPanel Grid.Column="2">
                         <TextBlock Text="预设" Foreground="{StaticResource TextTertiary}" FontSize="12" Margin="0,12,0,4" />
                         <ComboBox x:Name="AudioHapticsPresetCombo" SelectionChanged="AudioHapticsPreset_SelectionChanged">
                             <ComboBoxItem Tag="balanced" Content="平衡（推荐）" />
@@ -588,23 +785,34 @@
                         <Grid Margin="0,13,0,0">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Text="触觉强度" Foreground="#344054" FontSize="12" />
-                            <TextBlock x:Name="AudioHapticsStrengthText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
-                        </Grid>
-                        <Slider x:Name="AudioHapticsStrengthSlider" Minimum="0" Maximum="220" TickFrequency="5"
-                                ValueChanged="AudioHapticsSetting_ValueChanged" />
-                        <Grid Margin="0,8,0,0">
-                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="12" />
                                 <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="输入增益" Foreground="#344054" FontSize="12" />
-                            <TextBlock x:Name="AudioHapticsGainText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                            <StackPanel Margin="0,0,6,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="触觉强度" Foreground="#344054" FontSize="12" />
+                                    <TextBlock x:Name="AudioHapticsStrengthText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                </Grid>
+                                <Slider x:Name="AudioHapticsStrengthSlider" Minimum="0" Maximum="220" TickFrequency="5"
+                                        ValueChanged="AudioHapticsSetting_ValueChanged" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Margin="6,0,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Text="输入增益" Foreground="#344054" FontSize="12" />
+                                    <TextBlock x:Name="AudioHapticsGainText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                </Grid>
+                                <Slider x:Name="AudioHapticsGainSlider" Minimum="-24" Maximum="24" TickFrequency="1"
+                                        ValueChanged="AudioHapticsSetting_ValueChanged" />
+                            </StackPanel>
                         </Grid>
-                        <Slider x:Name="AudioHapticsGainSlider" Minimum="-24" Maximum="24" TickFrequency="1"
-                                ValueChanged="AudioHapticsSetting_ValueChanged" />
 
                         <Grid Margin="0,13,0,0">
                             <Grid.ColumnDefinitions>
@@ -636,26 +844,47 @@
                                     <ComboBoxItem Tag="swap" Content="交换左右马达" />
                                 </ComboBox>
                                 <Grid Margin="0,10,0,0">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <TextBlock Text="立体声宽度" Foreground="#344054" FontSize="12" />
-                                    <TextBlock x:Name="AudioHapticsWidthText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,6,0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="立体声宽度" Foreground="#344054" FontSize="12" />
+                                            <TextBlock x:Name="AudioHapticsWidthText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                        </Grid>
+                                        <Slider x:Name="AudioHapticsWidthSlider" Minimum="0" Maximum="200" TickFrequency="5"
+                                                ValueChanged="AudioHapticsSetting_ValueChanged" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Margin="6,0,0,0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="噪声门限" Foreground="#344054" FontSize="12" />
+                                            <TextBlock x:Name="AudioHapticsGateText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                        </Grid>
+                                        <Slider x:Name="AudioHapticsGateSlider" Minimum="-80" Maximum="-20" TickFrequency="1"
+                                                ValueChanged="AudioHapticsSetting_ValueChanged" />
+                                    </StackPanel>
                                 </Grid>
-                                <Slider x:Name="AudioHapticsWidthSlider" Minimum="0" Maximum="200" TickFrequency="5"
-                                        ValueChanged="AudioHapticsSetting_ValueChanged" />
                                 <Grid Margin="0,10,0,0">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <TextBlock Text="噪声门限" Foreground="#344054" FontSize="12" />
-                                    <TextBlock x:Name="AudioHapticsGateText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <StackPanel Margin="0,0,6,0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="压缩比" Foreground="#344054" FontSize="12" />
+                                            <TextBlock x:Name="AudioHapticsCompressionText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                        </Grid>
+                                        <Slider x:Name="AudioHapticsCompressionSlider" Minimum="1" Maximum="12" TickFrequency="0.5"
+                                                ValueChanged="AudioHapticsSetting_ValueChanged" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Margin="6,0,0,0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="输出上限" Foreground="#344054" FontSize="12" />
+                                            <TextBlock x:Name="AudioHapticsCeilingText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
+                                        </Grid>
+                                        <Slider x:Name="AudioHapticsCeilingSlider" Minimum="10" Maximum="100" TickFrequency="1"
+                                                ValueChanged="AudioHapticsSetting_ValueChanged" />
+                                    </StackPanel>
                                 </Grid>
-                                <Slider x:Name="AudioHapticsGateSlider" Minimum="-80" Maximum="-20" TickFrequency="1"
-                                        ValueChanged="AudioHapticsSetting_ValueChanged" />
-                                <Grid Margin="0,10,0,0">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <TextBlock Text="压缩比" Foreground="#344054" FontSize="12" />
-                                    <TextBlock x:Name="AudioHapticsCompressionText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
-                                </Grid>
-                                <Slider x:Name="AudioHapticsCompressionSlider" Minimum="1" Maximum="12" TickFrequency="0.5"
-                                        ValueChanged="AudioHapticsSetting_ValueChanged" />
                                 <!-- Each slider gets its own label and readout; one shared "4 / 120 ms" caption made it impossible to tell which slider you were dragging. -->
                                 <Grid Margin="0,10,0,0">
                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -687,13 +916,6 @@
                                                 ValueChanged="AudioHapticsSetting_ValueChanged" />
                                     </StackPanel>
                                 </Grid>
-                                <Grid Margin="0,10,0,0">
-                                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                                    <TextBlock Text="输出上限" Foreground="#344054" FontSize="12" />
-                                    <TextBlock x:Name="AudioHapticsCeilingText" Grid.Column="1" Foreground="#2563EB" FontSize="12" />
-                                </Grid>
-                                <Slider x:Name="AudioHapticsCeilingSlider" Minimum="10" Maximum="100" TickFrequency="1"
-                                        ValueChanged="AudioHapticsSetting_ValueChanged" />
                                 <CheckBox x:Name="AudioHapticsInvertRightCheckBox" Content="反相右马达"
                                           Margin="0,8,0,0" Foreground="#475467"
                                           Checked="AudioHapticsSetting_ValueChanged"
@@ -797,9 +1019,26 @@
                         </Expander>
                         <TextBlock x:Name="AudioHapticsStatusText" Text="选择播放设备后开始；设置会自动保存。"
                                    TextWrapping="Wrap" Foreground="#667085" FontSize="12" LineHeight="18" Margin="0,12,0,0" />
-                    </StackPanel>
+                        </StackPanel>
+                    </Grid>
                 </Border>
+              </StackPanel>
+            </ScrollViewer>
 
+            <ScrollViewer Grid.Column="2" x:Name="EffectsPanel"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <ScrollViewer.Style>
+                    <Style TargetType="ScrollViewer">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsChecked, ElementName=TabEffects}"
+                                         Value="False">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ScrollViewer.Style>
+              <StackPanel Margin="0,0,4,0">
                 <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0">
                     <StackPanel>
                         <TextBlock Text="扳机与灯效" FontSize="17" FontWeight="SemiBold" Foreground="#172B4D" />
@@ -916,7 +1155,23 @@
                                    LineHeight="18" Margin="0,10,0,0" />
                     </StackPanel>
                 </Border>
+              </StackPanel>
+            </ScrollViewer>
 
+            <ScrollViewer Grid.Column="2" x:Name="AudioBufferPanel"
+                          VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <ScrollViewer.Style>
+                    <Style TargetType="ScrollViewer">
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding IsChecked, ElementName=TabAudioBuffer}"
+                                         Value="False">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </ScrollViewer.Style>
+              <StackPanel Margin="0,0,4,0">
                 <Border Style="{StaticResource CardStyle}" Margin="0,14,0,0"
                         Background="#F8FAFF" BorderBrush="#D9E3FF">
                     <StackPanel>

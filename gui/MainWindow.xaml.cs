@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -23,6 +24,7 @@ public partial class MainWindow : Window
     private SystemSnapshot? _snapshot;
     private bool _refreshing;
     private bool _busy;
+    private bool _speakerEnabledBeforeControllerCapture;
     private bool _audioBufferLoaded;
     private int _appliedAudioBufferChunks = 3;
     private AudioHapticsSettings _audioHapticsSettings = new();
@@ -164,6 +166,7 @@ public partial class MainWindow : Window
                 string.Equals(item.Address, selectedAddress, StringComparison.OrdinalIgnoreCase))
                 ?? rows.FirstOrDefault();
             UpdateActionButtons();
+            RefreshAudioHapticsTargets();
             LastRefreshText.Text = $"上次刷新 {DateTime.Now:HH:mm:ss}";
 
             if (_snapshot.UpdateAvailable)
@@ -257,9 +260,13 @@ public partial class MainWindow : Window
         var serviceReady = _snapshot?.ServiceState == VdsServiceState.Running &&
                            _snapshot.UpdateAvailable != true &&
                            !_busy;
+        var usbTarget = (AudioHapticsTargetCombo.SelectedItem as AudioHapticsTarget)?.Mode
+            is "usb_audio" or "usb_rumble" or "bt_sbc";
         AudioHapticsToggleButton.IsEnabled = _audioHaptics.IsRunning ||
-                                              (serviceReady && AudioHapticsDeviceCombo.Items.Count > 0);
+                                              ((serviceReady || usbTarget) &&
+                                               AudioHapticsDeviceCombo.Items.Count > 0);
         AudioHapticsDeviceCombo.IsEnabled = !_audioHaptics.IsRunning && !_busy;
+        AudioHapticsTargetCombo.IsEnabled = !_audioHaptics.IsRunning && !_busy;
         AudioHapticsToggleButton.Content = _audioHaptics.IsRunning
             ? "停止音频触觉"
             : "开始音频触觉";
@@ -300,7 +307,8 @@ public partial class MainWindow : Window
     private void UpdateActionButtons()
     {
         var selected = ControllerGrid.SelectedItem as ControllerRow;
-        AttachButton.IsEnabled = selected is not null && !selected.Registered && !_busy;
+        AttachButton.IsEnabled = selected is not null && !selected.Registered &&
+                                 !selected.IsUsb && !_busy;
         DetachButton.IsEnabled = selected is not null && selected.Registered && !_busy;
         ProfileCombo.IsEnabled = selected is not null && !selected.Registered && !_busy;
         PortCombo.IsEnabled = selected is not null && !selected.Registered && !_busy;
@@ -586,6 +594,9 @@ public partial class MainWindow : Window
         AudioHapticsAttackSlider.Value = _audioHapticsSettings.AttackMs;
         AudioHapticsReleaseSlider.Value = _audioHapticsSettings.ReleaseMs;
         AudioHapticsWidthSlider.Value = _audioHapticsSettings.StereoWidthPercent;
+        AudioHapticsUsbLatencySlider.Value = Math.Clamp(_audioHapticsSettings.UsbLatencyMs, 30, 300);
+        AudioHapticsCaptureLatencySlider.Value = Math.Clamp(_audioHapticsSettings.CaptureLatencyMs, 10, 200);
+        AudioHapticsPlaybackQueueSlider.Value = Math.Clamp(_audioHapticsSettings.PlaybackQueueMs, 20, 300);
         AudioHapticsLeftSlider.Value = _audioHapticsSettings.LeftPercent;
         AudioHapticsRightSlider.Value = _audioHapticsSettings.RightPercent;
         AudioHapticsCeilingSlider.Value = _audioHapticsSettings.CeilingPercent;
@@ -593,6 +604,7 @@ public partial class MainWindow : Window
         SelectComboItemByTag(AudioHapticsChannelModeCombo, _audioHapticsSettings.ChannelMode);
         AudioHapticsSpeakerCheckBox.IsChecked = _audioHapticsSettings.SpeakerEnabled;
         AudioHapticsSpeakerVolumeSlider.Value = Math.Clamp(_audioHapticsSettings.SpeakerVolumePercent, 0, 100);
+        AudioHapticsSpeakerPreampSlider.Value = Math.Clamp(_audioHapticsSettings.SpeakerPreamp, 0, 7);
         AudioHapticsVoiceCoilGainSlider.Value = _audioHapticsSettings.HapticsGain;
         SelectComboItemByTag(AudioHapticsLeftSourceCombo, _audioHapticsSettings.LeftMotorSource.ToString());
         SelectComboItemByTag(AudioHapticsRightSourceCombo, _audioHapticsSettings.RightMotorSource.ToString());
@@ -613,6 +625,8 @@ public partial class MainWindow : Window
         try
         {
             RefreshAudioHapticsDevices();
+            RefreshAudioHapticsTargets();
+            UpdateAudioHapticsSpeakerGuard();
         }
         catch (Exception error)
         {
@@ -638,6 +652,61 @@ public partial class MainWindow : Window
         }
     }
 
+    private void RefreshAudioHapticsTargets()
+    {
+        if (AudioHapticsTargetCombo is null || _audioHaptics.IsRunning)
+        {
+            return;
+        }
+
+        var targets = new List<AudioHapticsTarget>
+        {
+            new("bridge", "", "虚拟桥接手柄（蓝牙）")
+        };
+        // A USBip-emulated "DualSense (USB)" is the virtual copy of a
+        // Bluetooth bridge controller (detected by its PnP parent chain).
+        // Writing the 4-channel audio to that virtual endpoint crackles
+        // (real cable does the same over the USB audio endpoint), while the
+        // bridge path (0x36/Opus) is clean, so keep only the bridge target.
+        foreach (var row in Controllers.Where(row => row.IsUsb))
+        {
+            if (IsDualSenseUsb(row.Address) && row.IsVirtual)
+            {
+                continue;
+            }
+            var mode = IsDualSenseUsb(row.Address) ? "usb_audio" : "usb_rumble";
+            targets.Add(new AudioHapticsTarget(mode, row.Address, row.Name));
+        }
+        // A DualShock 4 paired over Bluetooth has no Windows audio endpoint;
+        // the speaker is driven by SBC audio inside HID reports. Offer it as
+        // its own target whenever the device is reachable.
+        var btDs4Path = AudioHapticsEngine.FindDs4BtHidPath();
+        if (btDs4Path is not null)
+        {
+            targets.Add(new AudioHapticsTarget(
+                "bt_sbc", btDs4Path, "DualShock 4（蓝牙扬声器）"));
+        }
+
+        var selected = targets.FirstOrDefault(target =>
+                string.Equals(
+                    target.Mode,
+                    _audioHapticsSettings.TargetMode,
+                    StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    target.DeviceId,
+                    _audioHapticsSettings.TargetDeviceId,
+                    StringComparison.OrdinalIgnoreCase))
+            ?? targets[0];
+        _audioHapticsUiLoading = true;
+        AudioHapticsTargetCombo.ItemsSource = targets;
+        AudioHapticsTargetCombo.SelectedItem = selected;
+        _audioHapticsUiLoading = false;
+    }
+
+    private static bool IsDualSenseUsb(string address) =>
+        address.Contains("pid_0ce6", StringComparison.OrdinalIgnoreCase) ||
+        address.Contains("pid_0df2", StringComparison.OrdinalIgnoreCase);
+
     private static void SelectComboItemByTag(ComboBox comboBox, string tag)
     {
         comboBox.SelectedItem = comboBox.Items
@@ -658,6 +727,8 @@ public partial class MainWindow : Window
         return new AudioHapticsSettings
         {
             DeviceId = (AudioHapticsDeviceCombo.SelectedItem as AudioRenderDevice)?.Id ?? _audioHapticsSettings.DeviceId,
+            TargetMode = (AudioHapticsTargetCombo.SelectedItem as AudioHapticsTarget)?.Mode ?? "bridge",
+            TargetDeviceId = (AudioHapticsTargetCombo.SelectedItem as AudioHapticsTarget)?.DeviceId ?? "",
             AutoStart = AudioHapticsAutoStartCheckBox.IsChecked == true,
             StrengthPercent = Math.Round(AudioHapticsStrengthSlider.Value / 5) * 5,
             InputGainDb = Math.Round(AudioHapticsGainSlider.Value),
@@ -668,6 +739,9 @@ public partial class MainWindow : Window
             AttackMs = Math.Round(AudioHapticsAttackSlider.Value),
             ReleaseMs = Math.Round(AudioHapticsReleaseSlider.Value / 10) * 10,
             StereoWidthPercent = Math.Round(AudioHapticsWidthSlider.Value / 5) * 5,
+            UsbLatencyMs = Math.Round(AudioHapticsUsbLatencySlider.Value),
+            CaptureLatencyMs = Math.Round(AudioHapticsCaptureLatencySlider.Value),
+            PlaybackQueueMs = Math.Round(AudioHapticsPlaybackQueueSlider.Value),
             LeftPercent = Math.Round(AudioHapticsLeftSlider.Value / 5) * 5,
             RightPercent = Math.Round(AudioHapticsRightSlider.Value / 5) * 5,
             CeilingPercent = Math.Round(AudioHapticsCeilingSlider.Value),
@@ -675,6 +749,7 @@ public partial class MainWindow : Window
             InvertRight = AudioHapticsInvertRightCheckBox.IsChecked == true,
             SpeakerEnabled = AudioHapticsSpeakerCheckBox.IsChecked == true,
             SpeakerVolumePercent = Math.Round(AudioHapticsSpeakerVolumeSlider.Value / 5) * 5,
+            SpeakerPreamp = (int)Math.Round(AudioHapticsSpeakerPreampSlider.Value),
             HapticsGain = Math.Round(AudioHapticsVoiceCoilGainSlider.Value * 10) / 10,
             LeftMotorSource = ComboTagToInt(AudioHapticsLeftSourceCombo, 0),
             RightMotorSource = ComboTagToInt(AudioHapticsRightSourceCombo, 1),
@@ -778,6 +853,9 @@ public partial class MainWindow : Window
         AudioHapticsLowCutText.Text = $"{_audioHapticsSettings.LowCutHz:0} Hz";
         AudioHapticsHighCutText.Text = $"{_audioHapticsSettings.HighCutHz:0} Hz";
         AudioHapticsWidthText.Text = $"{_audioHapticsSettings.StereoWidthPercent:0}%";
+        AudioHapticsUsbLatencyText.Text = $"{_audioHapticsSettings.UsbLatencyMs:0} ms";
+        AudioHapticsCaptureLatencyText.Text = $"{_audioHapticsSettings.CaptureLatencyMs:0} ms";
+        AudioHapticsPlaybackQueueText.Text = $"{_audioHapticsSettings.PlaybackQueueMs:0} ms";
         AudioHapticsGateText.Text = $"{_audioHapticsSettings.GateDb:0} dB";
         AudioHapticsCompressionText.Text = $"{_audioHapticsSettings.CompressionRatio:0.0}:1";
         AudioHapticsAttackText.Text = $"{_audioHapticsSettings.AttackMs:0} ms";
@@ -791,6 +869,9 @@ public partial class MainWindow : Window
             : Visibility.Collapsed;
         AudioHapticsSpeakerVolumeText.Text = _audioHapticsSettings.SpeakerEnabled
             ? $"{_audioHapticsSettings.SpeakerVolumePercent:0}%"
+            : "";
+        AudioHapticsSpeakerPreampText.Text = _audioHapticsSettings.SpeakerEnabled
+            ? $"{_audioHapticsSettings.SpeakerPreamp:0}（2≈+6dB）"
             : "";
         AudioHapticsHeadroomPanel.Visibility = _audioHapticsSettings.ExceedsSafeHeadroom
             ? Visibility.Visible
@@ -839,7 +920,12 @@ public partial class MainWindow : Window
         {
             return;
         }
-        if (_snapshot?.ServiceState != VdsServiceState.Running || _snapshot.UpdateAvailable == true)
+        var targetMode = (AudioHapticsTargetCombo.SelectedItem as AudioHapticsTarget)?.Mode
+            ?? "bridge";
+        var needsService = targetMode == "bridge";
+        if (needsService &&
+            (_snapshot?.ServiceState != VdsServiceState.Running ||
+             _snapshot.UpdateAvailable == true))
         {
             if (showErrors)
             {
@@ -916,6 +1002,7 @@ public partial class MainWindow : Window
         try
         {
             RefreshAudioHapticsDevices();
+            RefreshAudioHapticsTargets();
             ApplyAudioHapticsSettingsFromUi(false);
             SetAudioHapticsStatus("播放设备列表已刷新。", NeutralForeground);
         }
@@ -925,12 +1012,78 @@ public partial class MainWindow : Window
         }
     }
 
+    private static bool CaptureSharesController(
+        AudioRenderDevice? capture, AudioHapticsTarget? target)
+    {
+        if (capture is null || target is null ||
+            string.IsNullOrWhiteSpace(target.DeviceId) ||
+            string.IsNullOrWhiteSpace(capture.ControllerDeviceId))
+        {
+            return false;
+        }
+        var match = Regex.Match(
+            target.DeviceId,
+            @"vid_([0-9a-f]{4})&pid_([0-9a-f]{4})",
+            RegexOptions.IgnoreCase);
+        return match.Success &&
+               capture.ControllerDeviceId.Contains(
+                   $"VID_{match.Groups[1].Value}&PID_{match.Groups[2].Value}",
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void UpdateAudioHapticsSpeakerGuard()
+    {
+        if (_audioHapticsUiLoading || AudioHapticsSpeakerCheckBox is null)
+        {
+            return;
+        }
+        var capture = AudioHapticsDeviceCombo.SelectedItem as AudioRenderDevice;
+        var target = AudioHapticsTargetCombo.SelectedItem as AudioHapticsTarget;
+        if (CaptureSharesController(capture, target))
+        {
+            if (AudioHapticsSpeakerCheckBox.IsEnabled)
+            {
+                _speakerEnabledBeforeControllerCapture =
+                    AudioHapticsSpeakerCheckBox.IsChecked == true;
+            }
+            AudioHapticsSpeakerCheckBox.IsChecked = false;
+            AudioHapticsSpeakerCheckBox.IsEnabled = false;
+            SetAudioHapticsStatus(
+                "采集源与输出目标是同一个手柄：扬声器转发已自动关闭（避免反馈啸叫），手柄硬件音量已保留，仅驱动震动。",
+                WarningForeground);
+            return;
+        }
+        var wasBlocked = !AudioHapticsSpeakerCheckBox.IsEnabled;
+        AudioHapticsSpeakerCheckBox.IsEnabled = true;
+        if (wasBlocked)
+        {
+            AudioHapticsSpeakerCheckBox.IsChecked =
+                _speakerEnabledBeforeControllerCapture;
+        }
+    }
+
     private void AudioHapticsDevice_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
+        UpdateAudioHapticsSpeakerGuard();
         ApplyAudioHapticsSettingsFromUi(false);
         if (_audioHaptics.IsRunning)
         {
             SetAudioHapticsStatus("捕获设备已更改，停止后重新开始即可切换。", WarningForeground);
+        }
+    }
+
+    private void AudioHapticsTarget_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_audioHapticsUiLoading)
+        {
+            return;
+        }
+        UpdateAudioHapticsSpeakerGuard();
+        ApplyAudioHapticsSettingsFromUi(false);
+        UpdateAudioHapticsAvailability();
+        if (_audioHaptics.IsRunning)
+        {
+            SetAudioHapticsStatus("手柄目标已更改，停止后重新开始即可切换。", WarningForeground);
         }
     }
 

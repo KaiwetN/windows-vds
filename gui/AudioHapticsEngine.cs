@@ -2,6 +2,9 @@ using System.Buffers.Binary;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Text.RegularExpressions;
 using System.Threading.Channels;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -19,17 +22,41 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
     // the haptics pair drives the voice coils.
     private const int ChannelsPerFrame = 4;
     private const int BytesPerChunk = FramesPerChunk * ChannelsPerFrame * sizeof(short);
+    // This property contains the underlying PnP instance path (for example
+    // {1}.USB\VID_054C&PID_0CE6&MI_00\...). MMDevice.InstanceId returns
+    // "Unknown" for these USB audio endpoints, so read ControllerDeviceId.
+    private static readonly PropertyKey ControllerDeviceIdKey =
+        PropertyKeys.PKEY_Device_ControllerDeviceId;
     private readonly object _lifecycleLock = new();
     private readonly HapticsProcessor _processor = new();
     private MMDeviceEnumerator? _enumerator;
     private MMDevice? _device;
     private WasapiLoopbackCapture? _capture;
     private NamedPipeClientStream? _pipe;
+    private MMDevice? _usbAudioDevice;
+    private WasapiOut? _usbAudioOut;
+    private BufferedWaveProvider? _usbAudioBuffer;
+    private IntPtr _ds4Device;
+    private IntPtr _dsHidDevice;
+    private MMDevice? _ds4SpeakerDevice;
+    private BufferedWaveProvider? _ds4SpeakerBuffer;
+    private WasapiOut? _ds4SpeakerOut;
+    private double _ds4SpeakerAccumulator;
+    private IntPtr _ds4BtDevice;
+    private double _btResamplePos;
+    private short _btPrevMono;
+    private ushort _btFrameNumber;
+    private readonly List<byte[]> _btSbcFrames = new(4);
     private Channel<byte[]>? _chunks;
     private CancellationTokenSource? _cancellation;
     private Task? _writerTask;
     private AudioHapticsSettings _settings = new();
     private long _lastLevelsTimestamp;
+    // DS4 0x05 output report volume bytes [19]/[20]/[22]. The DS4 firmware
+    // applies these every time a report arrives, so every rumble report must
+    // carry them or the headset output silently mutes.
+    private byte _ds4SpeakerVolume;
+    private bool _ds4SpeakerConfigured;
     private bool _running;
 
     public bool IsRunning
@@ -52,16 +79,34 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
         string? defaultId = null;
         try
         {
-            defaultId = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia).ID;
+            using var defaultDevice =
+                enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            defaultId = defaultDevice.ID;
         }
         catch
         {
         }
-        return enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
-            .Select(device => new AudioRenderDevice(
-                device.ID,
-                device.FriendlyName,
-                string.Equals(device.ID, defaultId, StringComparison.OrdinalIgnoreCase)))
+
+        var devices = new List<AudioRenderDevice>();
+        foreach (var device in enumerator.EnumerateAudioEndPoints(
+                     DataFlow.Render, DeviceState.Active))
+        {
+            using (device)
+            {
+                // Controller endpoints are intentionally listed too: users
+                // may want to drive haptics from the audio already routed to
+                // the controller. The feedback guard lives in StartAsync,
+                // which stops the speaker write-back when capture and target
+                // are the same controller.
+                devices.Add(new AudioRenderDevice(
+                    device.ID,
+                    device.FriendlyName,
+                    string.Equals(
+                        device.ID, defaultId, StringComparison.OrdinalIgnoreCase),
+                    GetControllerDeviceId(device) ?? ""));
+            }
+        }
+        return devices
             .OrderByDescending(device => device.IsDefault)
             .ThenBy(device => device.Name, StringComparer.CurrentCultureIgnoreCase)
             .ToArray();
@@ -85,10 +130,13 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
 
         try
         {
-            UpdateSettings(settings);
             _enumerator = new MMDeviceEnumerator();
             _device = ResolveDevice(_enumerator, settings.DeviceId);
+            settings = ApplyFeedbackGuard(_device, settings);
+            UpdateSettings(settings);
             _capture = new WasapiLoopbackCapture(_device);
+            SetCaptureBufferMilliseconds(
+                _capture, Math.Clamp((int)settings.CaptureLatencyMs, 10, 300));
             _capture.DataAvailable += Capture_DataAvailable;
             _capture.RecordingStopped += Capture_RecordingStopped;
             _processor.Reset(_capture.WaveFormat);
@@ -99,14 +147,81 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
                 SingleWriter = true
             });
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            _pipe = new NamedPipeClientStream(
-                ".",
-                PipeName,
-                PipeDirection.Out,
-                PipeOptions.Asynchronous | PipeOptions.WriteThrough);
-            await _pipe.ConnectAsync(2_500, _cancellation.Token);
-            await WriteHeaderAsync(_pipe, _cancellation.Token);
-            _writerTask = WriteChunksAsync(_pipe, _chunks.Reader, _cancellation.Token);
+            if (settings.TargetMode == "usb_audio")
+            {
+                (_usbAudioDevice, _usbAudioBuffer, _usbAudioOut) =
+                    OpenUsbAudioTarget(
+                        settings.TargetDeviceId,
+                        Math.Clamp((int)settings.UsbLatencyMs, 30, 300),
+                        Math.Clamp((int)settings.PlaybackQueueMs, 20, 500));
+                if (settings.SpeakerEnabled)
+                {
+                    // The DualSense firmware routes audio to the headphone
+                    // jack by default (even with no headset attached) and
+                    // keeps the internal speaker volume near zero, so the
+                    // speaker L/R channels written to the USB audio endpoint
+                    // stay silent unless we explicitly route them to the
+                    // internal speaker via a HID output report.
+                    _dsHidDevice = OpenDs4HidTarget(settings.TargetDeviceId);
+                    ConfigureDualSenseSpeaker(
+                        _dsHidDevice,
+                        Math.Clamp(settings.SpeakerPreamp, 0, 7));
+                }
+                _usbAudioOut.Play();
+                _writerTask = WriteUsbAudioChunksAsync(
+                    _usbAudioBuffer, _chunks.Reader, _cancellation.Token);
+            }
+            else if (settings.TargetMode == "usb_rumble")
+            {
+                _ds4Device = OpenDs4HidTarget(settings.TargetDeviceId);
+                if (settings.SpeakerEnabled)
+                {
+                    // The DS4 firmware re-applies the 0x05 volume bytes
+                    // whenever an output report arrives, and zeroed bytes mute
+                    // the headset amplifier even for native Windows playback.
+                    // When forwarding is on, set the slider volume up front so
+                    // the speaker path is active from the first chunk.
+                    ConfigureDs4Speaker(
+                        _ds4Device,
+                        Math.Clamp((int)settings.SpeakerVolumePercent, 0, 100));
+                    (_ds4SpeakerDevice, _ds4SpeakerBuffer, _ds4SpeakerOut) =
+                        OpenDs4SpeakerTarget(
+                            settings.TargetDeviceId,
+                            Math.Clamp((int)settings.UsbLatencyMs, 30, 300),
+                            Math.Clamp((int)settings.PlaybackQueueMs, 20, 500));
+                    _ds4SpeakerOut.Play();
+                }
+                _writerTask = WriteDs4RumbleChunksAsync(
+                    _ds4Device,
+                    _ds4SpeakerBuffer,
+                    _chunks.Reader,
+                    _cancellation.Token);
+            }
+            else if (settings.TargetMode == "bt_sbc")
+            {
+                // DualShock 4 speaker audio over Bluetooth: there is no
+                // Windows audio endpoint for the DS4 on BT, so the captured
+                // stream is SBC-encoded here and delivered through HID
+                // reports (one-shot 0x11 control, then 0x17 audio batches).
+                _ds4BtDevice = OpenDs4HidTarget(settings.TargetDeviceId);
+                ConfigureDs4BtSpeaker(
+                    _ds4BtDevice,
+                    Math.Clamp((int)settings.SpeakerVolumePercent, 0, 100));
+                _writerTask = WriteDs4BtAudioChunksAsync(
+                    _ds4BtDevice, _chunks.Reader, _cancellation.Token);
+            }
+            else
+            {
+                _pipe = new NamedPipeClientStream(
+                    ".",
+                    PipeName,
+                    PipeDirection.Out,
+                    PipeOptions.Asynchronous | PipeOptions.WriteThrough);
+                await _pipe.ConnectAsync(2_500, _cancellation.Token);
+                await WriteHeaderAsync(_pipe, _cancellation.Token);
+                _writerTask = WriteChunksAsync(
+                    _pipe, _chunks.Reader, _cancellation.Token);
+            }
             _capture.StartRecording();
         }
         catch
@@ -124,15 +239,799 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
     {
         if (!string.IsNullOrWhiteSpace(id))
         {
+            MMDevice selected;
             try
             {
-                return enumerator.GetDevice(id);
+                selected = enumerator.GetDevice(id);
             }
-            catch
+            catch (Exception error)
             {
+                throw new InvalidOperationException(
+                    "所选桌面音频触觉播放设备当前不可用，请刷新后重新选择。", error);
+            }
+
+            var keepSelected = false;
+            try
+            {
+                if (selected.State != DeviceState.Active)
+                {
+                    throw new InvalidOperationException(
+                        "所选桌面音频触觉播放设备当前未启用，请刷新后重新选择。");
+                }
+                keepSelected = true;
+                return selected;
+            }
+            finally
+            {
+                if (!keepSelected)
+                {
+                    selected.Dispose();
+                }
             }
         }
-        return enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+
+        MMDevice? defaultDevice = null;
+        try
+        {
+            defaultDevice = enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            return defaultDevice;
+        }
+        catch
+        {
+        }
+        finally
+        {
+            defaultDevice?.Dispose();
+        }
+
+        throw new InvalidOperationException(
+            "没有可用的桌面音频触觉播放设备。");
+    }
+
+    /// <summary>
+    /// When the loopback source is the same controller that the speaker path
+    /// writes to, the written audio would be captured again and howl. Haptics
+    /// stay enabled; only the speaker write-back is dropped.
+    /// </summary>
+    private static AudioHapticsSettings ApplyFeedbackGuard(
+        MMDevice captureDevice, AudioHapticsSettings settings)
+    {
+        if (!settings.SpeakerEnabled || string.IsNullOrWhiteSpace(settings.TargetDeviceId))
+        {
+            return settings;
+        }
+        var (vid, pid) = ParseVidPid(settings.TargetDeviceId);
+        if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(pid))
+        {
+            return settings;
+        }
+        var controllerPath = GetControllerDeviceId(captureDevice);
+        if (string.IsNullOrWhiteSpace(controllerPath) ||
+            !controllerPath.Contains(
+                $"VID_{vid}&PID_{pid}", StringComparison.OrdinalIgnoreCase))
+        {
+            return settings;
+        }
+        var guarded = settings.Clone();
+        guarded.SpeakerEnabled = false;
+        return guarded;
+    }
+
+    public static bool IsControllerAudioEndpoint(string deviceId)
+    {
+        if (string.IsNullOrWhiteSpace(deviceId))
+        {
+            return false;
+        }
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            using var device = enumerator.GetDevice(deviceId);
+            return IsDualSenseAudioEndpoint(device);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsDualSenseAudioEndpoint(MMDevice device)
+    {
+        string instancePath = "";
+        try
+        {
+            if (device.Properties.Contains(ControllerDeviceIdKey))
+            {
+                instancePath =
+                    device.Properties[ControllerDeviceIdKey].Value?.ToString() ?? "";
+            }
+        }
+        catch
+        {
+        }
+
+        if (instancePath.Contains(
+                @"USB\VID_054C&PID_0CE6", StringComparison.OrdinalIgnoreCase) ||
+            instancePath.Contains(
+                @"USB\VID_054C&PID_0DF2", StringComparison.OrdinalIgnoreCase) ||
+            instancePath.Contains(
+                @"USB\VID_054C&PID_05C4", StringComparison.OrdinalIgnoreCase) ||
+            instancePath.Contains(
+                @"USB\VID_054C&PID_09CC", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Product strings are stable USB descriptor values and provide a
+        // fallback for systems that do not expose the PnP property above.
+        var name = $"{device.FriendlyName} {device.DeviceFriendlyName}";
+        return name.Contains("DualSense Wireless Controller", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("DualSense Edge Wireless Controller", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("DUALSHOCK 4", StringComparison.OrdinalIgnoreCase) ||
+               name.Contains("DualShock 4", StringComparison.OrdinalIgnoreCase);
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr CreateFileW(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        IntPtr lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        IntPtr hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("hid.dll", SetLastError = true)]
+    private static extern bool HidD_SetOutputReport(
+        IntPtr hidDeviceObject,
+        byte[] reportBuffer,
+        uint reportBufferLength);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteFile(
+        IntPtr hFile,
+        byte[] lpBuffer,
+        uint nNumberOfBytesToWrite,
+        out uint lpNumberOfBytesWritten,
+        IntPtr lpOverlapped);
+
+    [DllImport("hid.dll")]
+    private static extern void HidD_GetHidGuid(out Guid hidGuid);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    private static extern IntPtr SetupDiGetClassDevsA(
+        ref Guid classGuid, string? enumerator, IntPtr hwndParent, uint flags);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiEnumDeviceInterfaces(
+        IntPtr deviceInfoSet, IntPtr deviceInfoData, ref Guid classGuid,
+        uint memberIndex, ref SpDeviceInterfaceData deviceInterfaceData);
+
+    [DllImport("setupapi.dll", SetLastError = true, CharSet = CharSet.Ansi)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiGetDeviceInterfaceDetailA(
+        IntPtr deviceInfoSet, ref SpDeviceInterfaceData deviceInterfaceData,
+        IntPtr detail, uint detailSize, out uint requiredSize,
+        ref SpDevInfoData deviceInfoData);
+
+    [DllImport("setupapi.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetupDiDestroyDeviceInfoList(IntPtr deviceInfoSet);
+
+    private const uint DigcfPresent = 0x00000002;
+    private const uint DigcfDeviceInterface = 0x00000010;
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SpDeviceInterfaceData
+    {
+        public uint CbSize;
+        public Guid InterfaceClassGuid;
+        public uint Flags;
+        public IntPtr Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SpDevInfoData
+    {
+        public uint CbSize;
+        public Guid ClassGuid;
+        public uint DevInst;
+        public IntPtr Reserved;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    private struct SpDeviceInterfaceDetailDataA
+    {
+        public uint CbSize;
+        public byte DevicePath;
+    }
+
+    private static string? GetControllerDeviceId(MMDevice device)
+    {
+        try
+        {
+            return device.Properties.Contains(ControllerDeviceIdKey)
+                ? device.Properties[ControllerDeviceIdKey].Value?.ToString()
+                : null;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static (string Vid, string Pid) ParseVidPid(string hidPath)
+    {
+        var match = Regex.Match(
+            hidPath,
+            @"vid_([0-9a-f]{4})&pid_([0-9a-f]{4})",
+            RegexOptions.IgnoreCase);
+        return match.Success
+            ? (match.Groups[1].Value, match.Groups[2].Value)
+            : ("", "");
+    }
+
+    private static void SetCaptureBufferMilliseconds(
+        WasapiLoopbackCapture capture, int milliseconds)
+    {
+        // NAudio's WasapiLoopbackCapture does not expose the capture buffer
+        // length in its public constructor, but the base WasapiCapture reads
+        // this private field when the client initializes on StartRecording.
+        // NAudio is shipped with the app, so the field name is stable.
+        try
+        {
+            var field = typeof(WasapiCapture).GetField(
+                "audioBufferMillisecondsLength",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            field?.SetValue(capture, milliseconds);
+        }
+        catch
+        {
+            // Keep the NAudio default when the field is unavailable.
+        }
+    }
+
+    private static bool DeviceMatchesVidPid(
+        MMDevice device, string vid, string pid)
+    {
+        var controllerPath = GetControllerDeviceId(device);
+        return !string.IsNullOrWhiteSpace(controllerPath) &&
+               controllerPath.Contains(
+                   $"VID_{vid}&PID_{pid}", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static (MMDevice Device, BufferedWaveProvider Buffer, WasapiOut Output)
+        OpenUsbAudioTarget(string hidPath, int latencyMs, int playbackQueueMs)
+    {
+        var (vid, pid) = ParseVidPid(hidPath);
+        if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(pid))
+        {
+            throw new InvalidOperationException("USB 手柄路径缺少 VID/PID，无法匹配音频端点。");
+        }
+
+        using var enumerator = new MMDeviceEnumerator();
+        foreach (var device in enumerator.EnumerateAudioEndPoints(
+                     DataFlow.Render, DeviceState.Active))
+        {
+            var keep = false;
+            try
+            {
+                if (!DeviceMatchesVidPid(device, vid, pid))
+                {
+                    continue;
+                }
+                var mix = device.AudioClient.MixFormat;
+                if (mix.Channels < 4)
+                {
+                    throw new InvalidOperationException(
+                        $"USB DualSense 音频端点只有 {mix.Channels} 声道，不支持音圈触觉。");
+                }
+                var format = mix as WaveFormatExtensible
+                    ?? new WaveFormatExtensible(
+                        mix.SampleRate, mix.BitsPerSample, mix.Channels);
+                var buffer = new BufferedWaveProvider(format)
+                {
+                    DiscardOnBufferOverflow = true,
+                    // User-adjustable queue that lets the loopback capture
+                    // clock and the controller's USB audio clock drift
+                    // without starving the endpoint into clicks/pops.
+                    BufferDuration = TimeSpan.FromMilliseconds(playbackQueueMs)
+                };
+                var output = new WasapiOut(
+                    device,
+                    AudioClientShareMode.Shared,
+                    true,
+                    latencyMs);
+                output.Init(buffer);
+                keep = true;
+                return (device, buffer, output);
+            }
+            finally
+            {
+                if (!keep)
+                {
+                    device.Dispose();
+                }
+            }
+        }
+        throw new InvalidOperationException(
+            "未找到与所选 USB DualSense 对应的音频端点，请确认手柄已开启音频。");
+    }
+
+    /// <summary>
+    /// Locates the Bluetooth HID interface of a DualShock 4. Bluetooth HID
+    /// paths embed the HID-over-Bluetooth service GUID
+    /// {00001124-0000-1000-8000-00805f9b34fb}, which distinguishes them from
+    /// the wired USB HID interface.
+    /// </summary>
+    internal static string? FindDs4BtHidPath()
+    {
+        Guid hidGuid;
+        HidD_GetHidGuid(out hidGuid);
+        var set = SetupDiGetClassDevsA(
+            ref hidGuid, null, IntPtr.Zero, DigcfPresent | DigcfDeviceInterface);
+        if (set == IntPtr.Zero || set == new IntPtr(-1))
+        {
+            return null;
+        }
+        try
+        {
+            for (uint index = 0; ; index++)
+            {
+                var ifData = new SpDeviceInterfaceData
+                {
+                    CbSize = (uint)Marshal.SizeOf<SpDeviceInterfaceData>()
+                };
+                if (!SetupDiEnumDeviceInterfaces(
+                        set, IntPtr.Zero, ref hidGuid, index, ref ifData))
+                {
+                    break;
+                }
+                uint required = 0;
+                var unused = new SpDevInfoData
+                {
+                    CbSize = (uint)Marshal.SizeOf<SpDevInfoData>()
+                };
+                SetupDiGetDeviceInterfaceDetailA(
+                    set, ref ifData, IntPtr.Zero, 0, out required, ref unused);
+                if (required == 0)
+                {
+                    continue;
+                }
+                IntPtr detail = Marshal.AllocHGlobal((int)required);
+                try
+                {
+                    Marshal.WriteInt32(
+                        detail, Marshal.SizeOf<SpDeviceInterfaceDetailDataA>());
+                    var info = new SpDevInfoData
+                    {
+                        CbSize = (uint)Marshal.SizeOf<SpDevInfoData>()
+                    };
+                    if (!SetupDiGetDeviceInterfaceDetailA(
+                            set, ref ifData, detail, required, out _, ref info))
+                    {
+                        continue;
+                    }
+                    string? path = Marshal.PtrToStringAnsi(
+                        IntPtr.Add(detail, (int)Marshal.OffsetOf<
+                            SpDeviceInterfaceDetailDataA>("DevicePath")));
+                    if (path is not null &&
+                        path.Contains(
+                            "pid&09cc",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        path.Contains(
+                            "{00001124-0000-1000-8000-00805f9b34fb}",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return path;
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(detail);
+                }
+            }
+        }
+        finally
+        {
+            SetupDiDestroyDeviceInfoList(set);
+        }
+        return null;
+    }
+
+    private static IntPtr OpenDs4HidTarget(string hidPath)
+    {
+        const uint genericRead = 0x80000000;
+        const uint genericWrite = 0x40000000;
+        const uint shareReadWrite = 0x00000003;
+        const uint openExisting = 3;
+        var handle = CreateFileW(
+            hidPath,
+            genericRead | genericWrite,
+            shareReadWrite,
+            IntPtr.Zero,
+            openExisting,
+            0,
+            IntPtr.Zero);
+        if (handle == IntPtr.Zero || handle == new IntPtr(-1))
+        {
+            throw new InvalidOperationException(
+                $"无法打开 USB 手柄 HID 设备：{(uint)Marshal.GetLastWin32Error():X8}");
+        }
+        return handle;
+    }
+
+    private static (MMDevice Device, BufferedWaveProvider Buffer, WasapiOut Output)
+        OpenDs4SpeakerTarget(string hidPath, int latencyMs, int playbackQueueMs)
+    {
+        var (vid, pid) = ParseVidPid(hidPath);
+        if (string.IsNullOrEmpty(vid) || string.IsNullOrEmpty(pid))
+        {
+            throw new InvalidOperationException("USB 手柄路径缺少 VID/PID，无法匹配扬声器端点。");
+        }
+
+        using var enumerator = new MMDeviceEnumerator();
+        foreach (var device in enumerator.EnumerateAudioEndPoints(
+                     DataFlow.Render, DeviceState.Active))
+        {
+            var keep = false;
+            try
+            {
+                if (!DeviceMatchesVidPid(device, vid, pid))
+                {
+                    continue;
+                }
+                var mix = device.AudioClient.MixFormat;
+                if (mix.Channels < 1)
+                {
+                    continue;
+                }
+                var format = mix as WaveFormatExtensible
+                    ?? new WaveFormatExtensible(
+                        mix.SampleRate, mix.BitsPerSample, mix.Channels);
+                var buffer = new BufferedWaveProvider(format)
+                {
+                    DiscardOnBufferOverflow = true,
+                    BufferDuration = TimeSpan.FromMilliseconds(playbackQueueMs)
+                };
+                var output = new WasapiOut(
+                    device,
+                    AudioClientShareMode.Shared,
+                    false,
+                    latencyMs);
+                output.Init(buffer);
+                keep = true;
+                return (device, buffer, output);
+            }
+            finally
+            {
+                if (!keep)
+                {
+                    device.Dispose();
+                }
+            }
+        }
+        throw new InvalidOperationException(
+            "未找到与所选 USB DS4 对应的扬声器音频端点。");
+    }
+
+    private static void WriteDs4Report(IntPtr device, byte[] report)
+    {
+        if (WriteFile(device, report, (uint)report.Length, out _, IntPtr.Zero))
+        {
+            return;
+        }
+        HidD_SetOutputReport(device, report, (uint)report.Length);
+    }
+
+    private void ConfigureDs4Speaker(IntPtr device, int volumePercent)
+    {
+        // DS4 USB main output report, ID 0x05 (32 bytes). Layout:
+        //   [1]  valid flags (0x01 rumble, 0x02 LED, 0x04 LED blink)
+        //   [4]  rumble right, [5] rumble left
+        //   [6..8]  LED RGB, [9..10] LED blink on/off
+        //   [11..18] reserved
+        //   [19] volume left, [20] volume right, [21] volume mic,
+        //   [22] volume speaker
+        // Volume range seen in real PS4 captures is 0x00-0x7F.
+        var report = new byte[32];
+        report[0] = 0x05;
+        report[1] = 0x01; // motor only; leave LED state untouched
+        report[4] = 0;
+        report[5] = 0;
+        _ds4SpeakerVolume = (byte)Math.Clamp(volumePercent * 0x7F / 100, 0, 0x7F);
+        report[19] = _ds4SpeakerVolume;
+        report[20] = _ds4SpeakerVolume;
+        report[22] = _ds4SpeakerVolume;
+        _ds4SpeakerConfigured = true;
+        WriteDs4Report(device, report);
+    }
+
+    private static void ConfigureDs4BtSpeaker(IntPtr device, int volumePercent)
+    {
+        // One-shot 0x11 control report: arms the DS4 Bluetooth audio plane
+        // and sets headphone + speaker volume. The DS4 has no per-tick volume
+        // byte over Bluetooth; the volumes live in this one-shot report.
+        var report = Ds4BtAudioProtocol.BuildControlReport(
+            speakerEnabled: true,
+            volumePercent: volumePercent,
+            bluetoothPollRate: 4);
+        WriteDs4Report(device, report);
+    }
+
+    private void SendDs4Rumble(IntPtr device, byte right, byte left)
+    {
+        var report = new byte[32];
+        report[0] = 0x05;
+        report[1] = 0x01; // motor only; 0x02 LED, 0x04 flash
+        report[4] = right;
+        report[5] = left;
+        if (_ds4SpeakerVolume > 0)
+        {
+            // Keep the headset volume applied on every report; the DS4
+            // firmware re-applies these bytes whenever a 0x05 report arrives.
+            report[19] = _ds4SpeakerVolume;
+            report[20] = _ds4SpeakerVolume;
+            report[22] = _ds4SpeakerVolume;
+        }
+        WriteDs4Report(device, report);
+    }
+
+    private static void ConfigureDualSenseSpeaker(IntPtr device, int preamp)
+    {
+        // DualSense USB main output report, ID 0x02. Windows reports the
+        // output report as 48 bytes including the ID byte (1 + 47 common).
+        var report = new byte[48];
+        report[0] = 0x02;  // report ID
+        report[1] = 0xA0;  // valid_flag0: AUDIO_CONTROL_ENABLE | SPEAKER_VOLUME_ENABLE
+        report[2] = 0x80;  // valid_flag1: AUDIO_CONTROL2_ENABLE
+        // Speaker volume, usable range 0x3d-0x64. Use 100% as plain unity
+        // gain (no preamp boost below) so the software volume slider has the
+        // full usable range; the earlier crackle came from the +6dB preamp
+        // pushing a full-scale desktop mix past the DAC headroom.
+        report[6] = 0x64;  // speaker volume (100%)
+        report[8] = 0x30;  // audio_control: output path = 0b11, route R channel to speaker
+        report[38] = (byte)preamp; // audio_control2: speaker preamp gain 0-7
+        WriteFile(device, report, (uint)report.Length, out _, IntPtr.Zero);
+    }
+
+    private static byte[] ConvertChunkToFloat(byte[] chunk)
+    {
+        var frames = chunk.Length / (ChannelsPerFrame * sizeof(short));
+        var output = new byte[frames * ChannelsPerFrame * sizeof(float)];
+        var destination = 0;
+        for (var sample = 0; sample < frames * ChannelsPerFrame; ++sample)
+        {
+            var source = sample * sizeof(short);
+            var value = BinaryPrimitives.ReadInt16LittleEndian(chunk.AsSpan(source, 2));
+            var sampleFloat = value / 32768f;
+            BinaryPrimitives.WriteSingleLittleEndian(
+                output.AsSpan(destination, 4), sampleFloat);
+            destination += sizeof(float);
+        }
+        return output;
+    }
+
+    private async Task WriteUsbAudioChunksAsync(
+        BufferedWaveProvider buffer,
+        ChannelReader<byte[]> reader,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var chunk in reader.ReadAllAsync(cancellationToken))
+            {
+                var floatChunk = ConvertChunkToFloat(chunk);
+                buffer.AddSamples(floatChunk, 0, floatChunk.Length);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            Faulted?.Invoke(this, $"USB 音频触觉输出中断：{error.Message}");
+        }
+    }
+
+    private async Task WriteDs4RumbleChunksAsync(
+        IntPtr device,
+        BufferedWaveProvider? speakerBuffer,
+        ChannelReader<byte[]> reader,
+        CancellationToken cancellationToken)
+    {
+        var previousRight = 0;
+        var previousLeft = 0;
+        try
+        {
+            await foreach (var chunk in reader.ReadAllAsync(cancellationToken))
+            {
+                var frames = chunk.Length / (ChannelsPerFrame * sizeof(short));
+                var rightPeak = 0;
+                var leftPeak = 0;
+                for (var frame = 0; frame < frames; ++frame)
+                {
+                    var baseIndex = frame * ChannelsPerFrame * sizeof(short);
+                    var hapticsLeft = Math.Abs((int)BinaryPrimitives.ReadInt16LittleEndian(
+                        chunk.AsSpan(baseIndex + 2 * sizeof(short), 2)));
+                    var hapticsRight = Math.Abs((int)BinaryPrimitives.ReadInt16LittleEndian(
+                        chunk.AsSpan(baseIndex + 3 * sizeof(short), 2)));
+                    leftPeak = Math.Max(leftPeak, hapticsLeft);
+                    rightPeak = Math.Max(rightPeak, hapticsRight);
+                }
+                var targetRight = Math.Clamp(rightPeak * 255 / 32768, 0, 255);
+                var targetLeft = Math.Clamp(leftPeak * 255 / 32768, 0, 255);
+                previousRight = SmoothMotor(previousRight, targetRight);
+                previousLeft = SmoothMotor(previousLeft, targetLeft);
+                if (!_ds4SpeakerConfigured)
+                {
+                    // Forwarding-off mode: do not touch the DS4 volume until
+                    // the first rumble report is actually needed, then set it
+                    // to full so the report bytes never mute the headset amp.
+                    ConfigureDs4Speaker(device, 100);
+                }
+                SendDs4Rumble(device, (byte)previousRight, (byte)previousLeft);
+                if (speakerBuffer is not null)
+                {
+                    var speakerChunk = ResampleDs4Speaker(
+                        chunk, speakerBuffer.WaveFormat, ref _ds4SpeakerAccumulator);
+                    if (speakerChunk.Length > 0)
+                    {
+                        speakerBuffer.AddSamples(
+                            speakerChunk, 0, speakerChunk.Length);
+                    }
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            Faulted?.Invoke(this, $"DS4 马达输出中断：{error.Message}");
+        }
+    }
+
+    private static byte[] ResampleDs4Speaker(
+        byte[] chunk, WaveFormat format, ref double accumulator)
+    {
+        var inputFrames = chunk.Length / (ChannelsPerFrame * sizeof(short));
+        var ratio = format.SampleRate / (double)HapticsSampleRate;
+        accumulator += inputFrames * ratio;
+        var outputFrames = (int)accumulator;
+        accumulator -= outputFrames;
+        if (outputFrames <= 0)
+        {
+            return Array.Empty<byte>();
+        }
+
+        var output = new byte[outputFrames * Math.Max(1, format.Channels) * sizeof(float)];
+        var destination = 0;
+        for (var frame = 0; frame < outputFrames; ++frame)
+        {
+            var source = frame / ratio;
+            var index0 = (int)source;
+            var fraction = (float)(source - index0);
+            var index1 = Math.Min(index0 + 1, inputFrames - 1);
+            var base0 = index0 * ChannelsPerFrame * sizeof(short);
+            var base1 = index1 * ChannelsPerFrame * sizeof(short);
+            var left0 = BinaryPrimitives.ReadInt16LittleEndian(chunk.AsSpan(base0, 2));
+            var right0 = BinaryPrimitives.ReadInt16LittleEndian(chunk.AsSpan(base0 + 2, 2));
+            var left1 = BinaryPrimitives.ReadInt16LittleEndian(chunk.AsSpan(base1, 2));
+            var right1 = BinaryPrimitives.ReadInt16LittleEndian(chunk.AsSpan(base1 + 2, 2));
+            var mono = (left0 + (left1 - left0) * fraction) +
+                       (right0 + (right1 - right0) * fraction);
+            var sampleFloat = mono * 0.5f / 32768f;
+            for (var channel = 0; channel < format.Channels; ++channel)
+            {
+                BinaryPrimitives.WriteSingleLittleEndian(
+                    output.AsSpan(destination, 4), sampleFloat);
+                destination += sizeof(float);
+            }
+        }
+        return output;
+    }
+
+    private async Task WriteDs4BtAudioChunksAsync(
+        IntPtr device,
+        ChannelReader<byte[]> reader,
+        CancellationToken cancellationToken)
+    {
+        var encoder = new SBC.DualShock4SbcEncoder();
+        var left = new short[SBC.DualShock4SbcEncoder.SamplesPerChannel];
+        var right = new short[SBC.DualShock4SbcEncoder.SamplesPerChannel];
+        var frameBytes = new byte[SBC.DualShock4SbcEncoder.FrameLength];
+        var pending = new List<short>(SBC.DualShock4SbcEncoder.SamplesPerChannel * 2);
+        _btSbcFrames.Clear();
+        _btFrameNumber = 0;
+        _btResamplePos = 0;
+        _btPrevMono = 0;
+        try
+        {
+            await foreach (var chunk in reader.ReadAllAsync(cancellationToken))
+            {
+                var inputFrames = chunk.Length / (ChannelsPerFrame * sizeof(short));
+                for (var index = 0; index < inputFrames; index++)
+                {
+                    var baseIndex = index * ChannelsPerFrame * sizeof(short);
+                    var leftSample = BinaryPrimitives.ReadInt16LittleEndian(
+                        chunk.AsSpan(baseIndex, 2));
+                    var rightSample = BinaryPrimitives.ReadInt16LittleEndian(
+                        chunk.AsSpan(baseIndex + 2, 2));
+                    var mono = (short)((leftSample + rightSample) / 2);
+                    // Linear resample 48 kHz -> 32 kHz. Output samples sit at
+                    // source positions 0, 1.5, 3.0, ... (48k/32k).
+                    while (_btResamplePos <= index)
+                    {
+                        var fraction = _btResamplePos - (index - 1);
+                        pending.Add((short)(
+                            _btPrevMono + (mono - _btPrevMono) * fraction));
+                        _btResamplePos +=
+                            Ds4BtAudioProtocol.SampleRate / (double)HapticsSampleRate;
+                        if (pending.Count >= SBC.DualShock4SbcEncoder.SamplesPerChannel)
+                        {
+                            EncodeAndSendDs4BtBlock(
+                                device, encoder, pending, left, right, frameBytes);
+                        }
+                    }
+                    _btPrevMono = mono;
+                }
+            }
+            // Drain the tail so the last block is not dropped on stop.
+            while (pending.Count >= SBC.DualShock4SbcEncoder.SamplesPerChannel)
+            {
+                EncodeAndSendDs4BtBlock(
+                    device, encoder, pending, left, right, frameBytes);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception error)
+        {
+            Faulted?.Invoke(this, $"DS4 蓝牙扬声器输出中断：{error.Message}");
+        }
+    }
+
+    private void EncodeAndSendDs4BtBlock(
+        IntPtr device,
+        SBC.DualShock4SbcEncoder encoder,
+        List<short> pending,
+        short[] left,
+        short[] right,
+        byte[] frameBytes)
+    {
+        for (var sample = 0; sample < SBC.DualShock4SbcEncoder.SamplesPerChannel; sample++)
+        {
+            left[sample] = pending[sample];
+            right[sample] = pending[sample];
+        }
+        pending.RemoveRange(0, SBC.DualShock4SbcEncoder.SamplesPerChannel);
+        encoder.Encode(left, right, frameBytes);
+        _btSbcFrames.Add((byte[])frameBytes.Clone());
+        if (_btSbcFrames.Count == 4)
+        {
+            var report = Ds4BtAudioProtocol.BuildSpeakerReport(
+                _btFrameNumber, _btSbcFrames.ToArray());
+            _btFrameNumber++;
+            _btSbcFrames.Clear();
+            WriteDs4Report(device, report);
+        }
+    }
+
+    private static int SmoothMotor(int previous, int target)
+    {
+        if (target > previous)
+        {
+            // Fast attack (~6 ms per chunk at 512 frames / 48 kHz).
+            return previous + (target - previous) * 3 / 4;
+        }
+        // Slower release to avoid harsh motor clicks.
+        return previous + (target - previous) / 3;
     }
 
     private async Task StopCoreAsync(bool sendSilence)
@@ -142,9 +1041,19 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
         Task? writerTask;
         CancellationTokenSource? cancellation;
         NamedPipeClientStream? pipe;
+        WasapiOut? usbAudioOut;
+        MMDevice? usbAudioDevice;
+        IntPtr ds4Device;
+        IntPtr ds4BtDevice;
+        IntPtr dsHidDevice;
+        WasapiOut? ds4SpeakerOut;
+        MMDevice? ds4SpeakerDevice;
         lock (_lifecycleLock)
         {
-            if (!_running && _capture is null && _pipe is null)
+            if (!_running && _capture is null && _pipe is null &&
+                _usbAudioOut is null && _ds4Device == IntPtr.Zero &&
+                _dsHidDevice == IntPtr.Zero &&
+                _ds4SpeakerOut is null)
             {
                 return;
             }
@@ -154,11 +1063,25 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
             writerTask = _writerTask;
             cancellation = _cancellation;
             pipe = _pipe;
+            usbAudioOut = _usbAudioOut;
+                usbAudioDevice = _usbAudioDevice;
+                ds4Device = _ds4Device;
+                ds4BtDevice = _ds4BtDevice;
+                dsHidDevice = _dsHidDevice;
+                ds4SpeakerOut = _ds4SpeakerOut;
+                ds4SpeakerDevice = _ds4SpeakerDevice;
             _capture = null;
             _chunks = null;
             _writerTask = null;
             _cancellation = null;
             _pipe = null;
+            _usbAudioOut = null;
+                _usbAudioDevice = null;
+                _ds4Device = IntPtr.Zero;
+                _ds4BtDevice = IntPtr.Zero;
+                _dsHidDevice = IntPtr.Zero;
+            _ds4SpeakerOut = null;
+            _ds4SpeakerDevice = null;
         }
 
         if (capture is not null)
@@ -197,6 +1120,56 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
         cancellation?.Cancel();
         cancellation?.Dispose();
         pipe?.Dispose();
+        if (usbAudioOut is not null)
+        {
+            try
+            {
+                usbAudioOut.Stop();
+            }
+            catch
+            {
+            }
+            usbAudioOut.Dispose();
+        }
+        usbAudioDevice?.Dispose();
+        if (ds4Device != IntPtr.Zero)
+        {
+            SendDs4Rumble(ds4Device, 0, 0);
+            CloseHandle(ds4Device);
+        }
+        if (ds4BtDevice != IntPtr.Zero)
+        {
+            try
+            {
+                // Disarm the Bluetooth audio plane on stop so the DS4 does
+                // not stay in audio mode after playback ends.
+                var disarm = Ds4BtAudioProtocol.BuildControlReport(
+                    speakerEnabled: false,
+                    volumePercent: 0,
+                    bluetoothPollRate: 4);
+                WriteDs4Report(ds4BtDevice, disarm);
+            }
+            catch
+            {
+            }
+            CloseHandle(ds4BtDevice);
+        }
+        if (dsHidDevice != IntPtr.Zero)
+        {
+            CloseHandle(dsHidDevice);
+        }
+        if (ds4SpeakerOut is not null)
+        {
+            try
+            {
+                ds4SpeakerOut.Stop();
+            }
+            catch
+            {
+            }
+            ds4SpeakerOut.Dispose();
+        }
+        ds4SpeakerDevice?.Dispose();
         _device?.Dispose();
         _device = null;
         _enumerator?.Dispose();
@@ -369,8 +1342,11 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
                 var rawRight = current.Right + (next.Right - current.Right) * fraction;
                 // Speaker channels carry the untouched capture; the haptics
                 // DSP chain (filters, gate, compression) stays haptics-only.
-                var speakerLeft = SoftLimit(rawLeft * speakerGain, .98f);
-                var speakerRight = SoftLimit(rawRight * speakerGain, .98f);
+                // Plain full-scale clamp instead of the tanh soft limiter so
+                // the speaker keeps as much peak level as the DAC can use;
+                // the preamp slider is the hardware loudness control now.
+                var speakerLeft = Math.Clamp(rawLeft * speakerGain, -1f, 1f);
+                var speakerRight = Math.Clamp(rawRight * speakerGain, -1f, 1f);
                 ProcessFrame(rawLeft, rawRight, settings, out var hapticsLeft, out var hapticsRight);
                 outputLeftPeak = Math.Max(outputLeftPeak, Math.Abs(hapticsLeft));
                 outputRightPeak = Math.Max(outputRightPeak, Math.Abs(hapticsRight));

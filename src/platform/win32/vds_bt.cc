@@ -49,6 +49,8 @@ using Clock = std::chrono::steady_clock;
 
 constexpr std::uint8_t kBtHidpInputPrefix = 0xa1;
 constexpr std::uint8_t kBtHidpOutputPrefix = VDS_BT_OUTPUT_PREFIX;
+constexpr std::uint16_t kDs4ProductIdV1 = 0x05c4;
+constexpr std::uint16_t kDs4ProductIdV2 = 0x09cc;
 constexpr const char *kBtHidServiceUuid =
     "00001124-0000-1000-8000-00805f9b34fb";
 constexpr const char *kHidDeviceClassRegistryPath =
@@ -391,6 +393,17 @@ public:
 
   void write_feature_report(std::span<const std::uint8_t> report) override {
     set_feature_report(report);
+  }
+
+  bool
+  try_write_feature_report_raw(std::span<const std::uint8_t> report) override {
+    if (report.empty() || report.size() > feature_report_length_) {
+      return false;
+    }
+    std::vector<std::uint8_t> buffer(feature_report_length_);
+    std::copy(report.begin(), report.end(), buffer.begin());
+    return HidD_SetFeature(feature_handle_.get(), buffer.data(),
+                           static_cast<ULONG>(buffer.size())) != FALSE;
   }
 
   void write_interrupt_packet(std::span<const std::uint8_t> packet) override {
@@ -1184,6 +1197,112 @@ std::vector<HidBluetoothDevice> list_bluetooth_controller_devices() {
   if (error != ERROR_NO_MORE_ITEMS) {
     throw std::runtime_error("BluetoothFindNextDevice failed: " +
                              win32_error_message(error));
+  }
+  return devices;
+}
+
+std::vector<HidUsbDevice> list_usb_controller_devices() {
+  std::vector<HidUsbDevice> devices;
+
+  GUID hid_guid{};
+  HidD_GetHidGuid(&hid_guid);
+  UniqueDeviceInfoSet device_set(SetupDiGetClassDevsA(
+      &hid_guid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE));
+  if (!device_set) {
+    throw std::runtime_error("SetupDiGetClassDevs(HID) failed: " +
+                             win32_error_message(GetLastError()));
+  }
+
+  for (DWORD index = 0;; ++index) {
+    SP_DEVICE_INTERFACE_DATA interface_data{};
+    interface_data.cbSize = sizeof(interface_data);
+    if (!SetupDiEnumDeviceInterfaces(device_set.get(), nullptr, &hid_guid,
+                                     index, &interface_data)) {
+      const DWORD error = GetLastError();
+      if (error == ERROR_NO_MORE_ITEMS) {
+        break;
+      }
+      throw std::runtime_error("SetupDiEnumDeviceInterfaces(HID) failed: " +
+                               win32_error_message(error));
+    }
+
+    DWORD required = 0;
+    SetupDiGetDeviceInterfaceDetailA(device_set.get(), &interface_data,
+                                     nullptr, 0, &required, nullptr);
+    if (required == 0) {
+      continue;
+    }
+
+    std::vector<std::uint8_t> detail_buffer(required);
+    auto *detail = reinterpret_cast<PSP_DEVICE_INTERFACE_DETAIL_DATA_A>(
+        detail_buffer.data());
+    detail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_A);
+    SP_DEVINFO_DATA device_info{};
+    device_info.cbSize = sizeof(device_info);
+    if (!SetupDiGetDeviceInterfaceDetailA(device_set.get(), &interface_data,
+                                          detail, required, nullptr,
+                                          &device_info)) {
+      continue;
+    }
+
+    const std::string path = detail->DevicePath;
+    // Wired USB only: Bluetooth HID endpoints carry the serial-port UUID in
+    // their device path, and the BT path is already covered by the BT list.
+    if (lowercase_ascii(path).find(kBtHidServiceUuid) != std::string::npos) {
+      continue;
+    }
+
+    UniqueHandle query_handle(CreateFileA(path.c_str(), 0, kDeviceShareMode,
+                                          nullptr, OPEN_EXISTING,
+                                          FILE_ATTRIBUTE_NORMAL, nullptr));
+    if (!query_handle) {
+      continue;
+    }
+    HIDD_ATTRIBUTES attributes{};
+    attributes.Size = sizeof(attributes);
+    if (!HidD_GetAttributes(query_handle.get(), &attributes)) {
+      continue;
+    }
+
+    const std::uint16_t product_id = attributes.ProductID;
+    if (attributes.VendorID != VDS_SONY_VENDOR_ID ||
+        (product_id != VDS_DS5_PRODUCT_ID &&
+         product_id != VDS_DSE_PRODUCT_ID &&
+         product_id != kDs4ProductIdV1 && product_id != kDs4ProductIdV2)) {
+      continue;
+    }
+
+    PHIDP_PREPARSED_DATA preparsed = nullptr;
+    if (!HidD_GetPreparsedData(query_handle.get(), &preparsed)) {
+      continue;
+    }
+    HIDP_CAPS caps{};
+    const NTSTATUS caps_status = HidP_GetCaps(preparsed, &caps);
+    HidD_FreePreparsedData(preparsed);
+    if (caps_status != HIDP_STATUS_SUCCESS || caps.UsagePage != 0x01 ||
+        caps.Usage != 0x05) {
+      continue;
+    }
+
+    std::string name;
+    std::uint32_t profile = VDS_PROFILE_DS5;
+    bool ds4 = false;
+    if (product_id == VDS_DSE_PRODUCT_ID) {
+      name = "DualSense Edge (USB)";
+      profile = VDS_PROFILE_DSE;
+    } else if (product_id == VDS_DS5_PRODUCT_ID) {
+      name = "DualSense (USB)";
+    } else {
+      name = "DualShock 4 (USB)";
+      ds4 = true;
+    }
+    devices.push_back(HidUsbDevice{
+        .path = path,
+        .instance_path = device_instance_path(device_info.DevInst),
+        .name = std::move(name),
+        .profile = profile,
+        .ds4 = ds4,
+    });
   }
   return devices;
 }
