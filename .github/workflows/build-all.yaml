@@ -1,6 +1,9 @@
 name: Build all packages
 
 on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+*'
   workflow_dispatch:
     inputs:
       debian_revision:
@@ -185,12 +188,26 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:VDS_VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
           cmake --build build\windows --config Release --parallel
 
+      - name: Publish vDS Control Center
+        shell: pwsh
+        run: |
+          dotnet publish "gui\VdsGui.csproj" `
+            --configuration Release `
+            --runtime win-x64 `
+            --self-contained false `
+            --output "out\gui" `
+            --nologo `
+            -p:PublishSingleFile=true `
+            -p:DebugSymbols=false `
+            -p:DebugType=None
+
       - name: Build Windows setup package
         shell: pwsh
         run: |
           $Args = @{
             ToolsDir = (Resolve-Path "build\windows\Release").Path
             OutputDir = (Resolve-Path ".").Path + "\dist\windows"
+            GuiDir = (Resolve-Path "out\gui").Path
           }
           if (![string]::IsNullOrWhiteSpace("${{ inputs.windows_pkgrel }}")) {
             $Args.PkgRel = "${{ inputs.windows_pkgrel }}"
@@ -221,7 +238,11 @@ jobs:
       - name: Resolve raw version
         id: version
         run: |
-          raw_version="$(./generate-version.sh)"
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            raw_version="$GITHUB_REF_NAME"
+          else
+            raw_version="$(./generate-version.sh)"
+          fi
           echo "raw_version=${raw_version}" >> "$GITHUB_OUTPUT"
           echo "Raw version: ${raw_version}"
 
@@ -245,7 +266,13 @@ jobs:
           fi
 
           prerelease=false
-          if [ "$RELEASE_LABEL" = "Pre-release" ]; then
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            case "$GITHUB_REF_NAME" in
+              *-rc*|*-alpha*|*-beta*|*-preview*|*-pre*)
+                prerelease=true
+                ;;
+            esac
+          elif [ "$RELEASE_LABEL" = "Pre-release" ]; then
             prerelease=true
           fi
 

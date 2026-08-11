@@ -5,7 +5,8 @@ param(
   [string]$ToolsDir = "",
   [string]$PkgRel = "",
   [string]$Arch = "x64",
-  [string]$Wix = ""
+  [string]$Wix = "",
+  [string]$GuiDir = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -80,6 +81,19 @@ function Test-VdsToolsDir {
   return $true
 }
 
+function Test-VdsGuiDir {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path)) {
+    return $false
+  }
+
+  return Test-Path -LiteralPath (Join-Path $Path "VdsGui.exe") -PathType Leaf
+}
+
 function Resolve-VdsToolsDir {
   if (![string]::IsNullOrWhiteSpace($ToolsDir)) {
     $Resolved = Resolve-VdsPath -Path $ToolsDir
@@ -100,6 +114,28 @@ function Resolve-VdsToolsDir {
   }
 
   throw "tools directory was not found. Build vdsd.exe/vdsctl.exe first or pass -ToolsDir."
+}
+
+function Resolve-VdsGuiDir {
+  if (![string]::IsNullOrWhiteSpace($GuiDir)) {
+    $Resolved = Resolve-VdsPath -Path $GuiDir
+    if (!(Test-VdsGuiDir -Path $Resolved)) {
+      throw "GUI directory must contain VdsGui.exe: $Resolved"
+    }
+    return $Resolved
+  }
+
+  $Candidates = @(
+    (Join-Path $RepoRoot "out\gui"),
+    (Join-Path $RepoRoot "gui\bin\Release\net8.0-windows\win-x64"),
+    (Join-Path $RepoRoot "gui\bin\Release\net8.0-windows")
+  )
+  foreach ($Candidate in $Candidates) {
+    if (Test-VdsGuiDir -Path $Candidate) {
+      return Resolve-VdsPath -Path $Candidate
+    }
+  }
+  return ""
 }
 
 function ConvertTo-RtfEscapedText {
@@ -492,6 +528,7 @@ if ([string]::IsNullOrWhiteSpace($ResolvedDisplayVersion)) {
 }
 $ResolvedWix = Resolve-Wix
 $ResolvedToolsDir = Resolve-VdsToolsDir
+$ResolvedGuiDir = Resolve-VdsGuiDir
 
 $PackageFileNameArgs = @{
   Name = "vDSSetup"
@@ -528,18 +565,24 @@ Build-NativeDll `
   -SourcePath $SetupActionsSource `
   -OutputPath $SetupActionsPath
 
-Invoke-WixBuild `
-  -Arguments @(
+$WixArguments = @(
   (Join-Path $WixDir "Product.wxs"),
   "-arch", $Arch,
   "-d", "VdsVersion=$ResolvedVersion",
   "-d", "VdsDisplayVersion=$ResolvedDisplayVersion",
   "-d", "LicenseRtf=$LicenseRtf",
-  "-d", "ToolsDir=$ResolvedToolsDir",
+  "-d", "ToolsDir=$ResolvedToolsDir"
+)
+if (![string]::IsNullOrWhiteSpace($ResolvedGuiDir)) {
+  $WixArguments += @("-d", "GuiDir=$ResolvedGuiDir")
+}
+$WixArguments += @(
   "-d", "SetupActions=$SetupActionsPath",
   "-d", "UninstallRunner=$UninstallRunnerPath",
   "-out", $MainMsiPath
-) `
+)
+Invoke-WixBuild `
+  -Arguments $WixArguments `
   -FailureMessage "wix main MSI build failed"
 
 New-SetupPayloadHeader `
@@ -554,3 +597,6 @@ Build-NativeLauncher `
   -ManifestPath $SetupLauncherManifest
 
 Write-Output $SetupPath
+if (![string]::IsNullOrWhiteSpace($ResolvedGuiDir)) {
+  Write-Output "GUI: $ResolvedGuiDir\VdsGui.exe (included in installer)"
+}

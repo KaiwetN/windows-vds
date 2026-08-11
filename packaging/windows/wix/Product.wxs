@@ -40,12 +40,32 @@
           <Environment Id="env_machine_path" Name="Path" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes"/>
           <RegistryValue Root="HKLM" Key="Software\vDS\Setup" Name="PathEntry" Type="string" Value="1" KeyPath="yes"/>
         </Component>
+        <?ifdef GuiDir ?>
+        <Component Id="cmp_vdsgui_exe" Guid="{E2049855-D5EE-43D4-A77E-C00AAC293AF7}">
+          <File Id="fil_vdsgui_exe" Source="$(var.GuiDir)\VdsGui.exe" KeyPath="yes"/>
+        </Component>
+        <?endif ?>
       </Directory>
     </StandardDirectory>
+    <?ifdef GuiDir ?>
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="VdsProgramMenuDir" Name="vDS">
+        <Component Id="cmp_vdsgui_shortcut" Guid="{14E58E2B-B9AC-42EB-854E-53FC475CA1F4}">
+          <Shortcut Id="VdsGuiStartMenuShortcut" Directory="VdsProgramMenuDir" Name="vDS Control Center" Target="[INSTALLFOLDER]VdsGui.exe" WorkingDirectory="INSTALLFOLDER"/>
+          <RemoveFolder Id="RemoveVdsProgramMenuDir" On="uninstall"/>
+          <RegistryValue Root="HKCU" Key="Software\vDS\Setup" Name="GuiShortcut" Type="string" Value="1" KeyPath="yes"/>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <?endif ?>
     <Feature Id="MainFeature" Title="vDS" Level="1">
       <ComponentRef Id="cmp_vdsd_exe"/>
       <ComponentRef Id="cmp_vdsctl_exe"/>
       <ComponentRef Id="cmp_opus_dll"/>
+      <?ifdef GuiDir ?>
+      <ComponentRef Id="cmp_vdsgui_exe"/>
+      <ComponentRef Id="cmp_vdsgui_shortcut"/>
+      <?endif ?>
       <ComponentRef Id="cmp_machine_path"/>
     </Feature>
     <CustomAction Id="SetVdsRepair" Property="VDS_REPAIR" Value="1"/>
@@ -122,7 +142,7 @@
         <Control Id="AddToPath" Type="CheckBox" X="58" Y="112" Width="160" Height="18" CheckBoxValue="1" Property="INSTALL_PATH" Text="Add install directory to PATH"/>
         <Control Id="Usbip" Type="CheckBox" X="40" Y="136" Width="175" Height="18" CheckBoxValue="1" Property="INSTALL_USBIP" Disabled="yes" Text="USB/IP client (usbip-win2)"/>
         <Control Id="HidHide" Type="CheckBox" X="40" Y="160" Width="175" Height="18" CheckBoxValue="1" Property="INSTALL_HIDHIDE" Disabled="yes" Text="HidHide"/>
-        <Control Id="UserspaceDetails" Type="Text" X="244" Y="84" Width="104" Height="96" NoPrefix="yes" Text="Installs vdsd.exe, vdsctl.exe, the runtime DLL, and the vdsd Windows service. Missing USB/IP and HidHide dependencies are downloaded separately."/>
+        <Control Id="UserspaceDetails" Type="Text" X="244" Y="84" Width="104" Height="96" NoPrefix="yes" Text="Installs vdsd.exe, vdsctl.exe, the runtime DLL, the vdsd service, and the Control Center GUI. Missing USB/IP and HidHide dependencies are downloaded separately."/>
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0"/>
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="Back">
           <Publish Event="NewDialog" Value="LicenseDlg"/>

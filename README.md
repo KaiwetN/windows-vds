@@ -18,6 +18,9 @@ virtual USB traffic. Linux exposes the virtual DualSense-class device through
 `vds_hcd.ko`. Windows exports it through usbip-win2 and uses HidHide to conceal
 the physical controller from other applications.
 
+On Windows, the setup package also ships the vDS Control Center GUI (`VdsGui`).
+It is a framework-dependent .NET 8 app and requires the .NET 8 Desktop Runtime.
+
 Detailed DualSense output and haptics packet handling is based on
 [DS5Dongle](https://github.com/awalol/DS5Dongle) and protocol capture research.
 In theory, other physical gamepad controllers could be implemented as vDS

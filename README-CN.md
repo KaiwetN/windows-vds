@@ -117,6 +117,11 @@ cd "C:\Users\Administrator\Documents\New project\windows-vds"
 - `vdsctl`：手柄注册和诊断工具；
 - `VdsGui`：中文图形控制中心，并添加到开始菜单的 `vDS` 文件夹。
 
+> **提示：** `VdsGui` 是框架依赖的 .NET 8 应用，需要
+> [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)。
+> 未安装时首次启动会提示缺少运行时；可提前用
+> `winget install Microsoft.DotNet.DesktopRuntime.8` 安装。
+
 > **注意：** 安装 USB/IP 驱动会重启 USB 3 Hub，键鼠等 USB 设备可能短暂断开。
 > 如果脚本提示需要重启，请先重启 Windows。
 

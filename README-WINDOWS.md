@@ -25,6 +25,8 @@ Application
 
 - Microsoft Visual C++ Redistributable
 - Opus runtime DLL
+- .NET 8 Desktop Runtime (required by the vDS Control Center GUI, `VdsGui.exe`,
+  shipped in the Windows setup package)
 - [usbip-win2](https://github.com/vadimgrn/usbip-win2)
 - [HidHide](https://github.com/nefarius/HidHide)
 
@@ -116,6 +118,11 @@ C:\Program Files\vDS\vdsd.exe
 C:\Program Files\vDS\vdsctl.exe
 C:\Program Files\vDS\opus.dll
 ```
+
+The Windows setup package additionally installs the vDS Control Center GUI
+(`VdsGui.exe`) and a Start Menu shortcut under the `vDS` folder. The GUI is a
+framework-dependent .NET 8 app, so the .NET 8 Desktop Runtime must be installed
+for it to run.
 
 The service is registered but not started immediately. Start it without
 rebooting:
