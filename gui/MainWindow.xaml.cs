@@ -1149,8 +1149,8 @@ public partial class MainWindow : Window
         AudioHapticsCeilingSlider.Value = ceiling;
 
         // A preset must define the whole voice-coil chain. Without this the
-        // per-motor trim and the EQ/gain mix settings survive a preset change and
-        // silently colour it.
+        // per-motor trim and the EQ/gain mix settings survive a preset change
+        // and silently colour it.
         AudioHapticsLeftSlider.Value = 100;
         AudioHapticsRightSlider.Value = 100;
         AudioHapticsVoiceCoilGainSlider.Value = 1.0;

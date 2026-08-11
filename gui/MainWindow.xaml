@@ -922,7 +922,7 @@
                                           Unchecked="AudioHapticsSetting_ValueChanged" />
                             </StackPanel>
                         </Expander>
-                        <Expander Header="音频混音 / 原生音圈 " Margin="0,10,0,0" Foreground="#344054">
+                        <Expander Header="音频混音 / 原生音圈" Margin="0,10,0,0" Foreground="#344054">
                             <StackPanel Margin="0,10,0,0">
                                 <TextBlock Text="音圈增益" Foreground="#344054" FontSize="12" />
                                 <TextBlock x:Name="AudioHapticsVoiceCoilGainText" Foreground="#2563EB" FontSize="12" Margin="0,3,0,0" />

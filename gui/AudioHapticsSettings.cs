@@ -35,17 +35,15 @@ public sealed class AudioHapticsSettings
     public string ChannelMode { get; set; } = "stereo";
     public bool InvertRight { get; set; }
 
-    // --- DSX-model haptics shaping -------------------------------------
-    // Implements the AudioToHaptics_Mix_Mode {OFF, BAND_3, BAND_6}. Uses
-    // NAudio BiQuad: low shelf on the first band, peaking in the middle,
-    // high shelf on the last. Gains are dB in a -20..+20 range.
+    // --- Haptics EQ and gain shaping ------------------------------------
+    // Mix modes {OFF, BAND_3, BAND_6}: low shelf on the first band, peaking
+    // in the middle, high shelf on the last. Gains are dB in the -20..+20
+    // range.
     public string EqMode { get; set; } = "off";
 
-    // Frequencies are tuned for this path rather than a reference (3-band 100/500/5k,
-    // 6-band 50/120/400/1k/3k/10k). The haptics channel is decimated 16:1 to
-    // 3 kHz, so its Nyquist is 1.5 kHz and every band above that is inert
-    // here - those bands also feed the speaker and headset, which this
-    // injection path does not carry. These land inside the band the voice
+    // Frequencies are tuned for the haptics path. The haptics channel is
+    // decimated 16:1 to 3 kHz, so its Nyquist is 1.5 kHz; bands above that
+    // are inert on the voice coils. These land inside the band the voice
     // coils actually reproduce.
     public double Eq3Band1Hz { get; set; } = 60;
     public double Eq3Band1GainDb { get; set; }
@@ -67,13 +65,11 @@ public sealed class AudioHapticsSettings
     public double Eq6Band6Hz { get; set; } = 1200;
     public double Eq6Band6GainDb { get; set; }
 
-    // Haptics gain: linear multiplier, slider 0.1..10,
-    // "Recommended: 1.0 - 5.0". Defaults to 1.0 here so existing profiles
-    // keep their current loudness (a reference ships 2.0).
+    // Haptics gain: linear multiplier, slider 0.1..10, recommended 1.0-5.0.
+    // Defaults to 1.0 so existing profiles keep their current loudness.
     public double HapticsGain { get; set; } = 1.0;
 
-    // Source stereo channel mapping: the SOURCE
-    // stereo channel feeding each actuator (0 = Left, 1 = Right).
+    // Source stereo channel feeding each actuator (0 = Left, 1 = Right).
     public int LeftMotorSource { get; set; }
     public int RightMotorSource { get; set; } = 1;
 

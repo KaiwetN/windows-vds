@@ -1,5 +1,7 @@
 # vDS (virtual DualSense)
 
+[简体中文](README-CN.md)
+
 [![Sponsor](https://img.shields.io/badge/Sponsor-hurryman2212-ea4aaa?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/hurryman2212)
 
 Virtual USB-to-Bluetooth bridge for DualSense and DualSense Edge Wireless

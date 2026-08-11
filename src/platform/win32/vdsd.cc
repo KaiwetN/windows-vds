@@ -3772,8 +3772,9 @@ handle_audio_buffer_control_command(const std::string &request,
 /*
  * DSX-compatible UDP API. Speaks the publicly documented DSX instruction
  * protocol (JSON over UDP, default 127.0.0.1:6969) so existing DSX-aware game
- * mods and tools work against vDS unchanged. Instruction identifiers follow the community-published protocol: InstructionType {GetDSXStatus=0, TriggerUpdate=1,
- * RGBUpdate=2, PlayerLED=3, TriggerThreshold=4, MicLED=5,
+ * mods and tools work against vDS unchanged. Instruction identifiers follow
+ * the community-published protocol: InstructionType {GetDSXStatus=0,
+ * TriggerUpdate=1, RGBUpdate=2, PlayerLED=3, TriggerThreshold=4, MicLED=5,
  * PlayerLEDNewRevision=6, ResetToUserSettings=7}.
  */
 namespace dsx_api {
@@ -4013,9 +4014,10 @@ unsigned clamp_range(unsigned value, unsigned low, unsigned high) {
 }
 
 /*
- * Maps the CustomTriggerValueMode values onto raw legacy firmware mode bytes
- * (community table: Off, Rigid, RigidA, RigidB, RigidAB, Pulse, PulseA,
- * PulseB, PulseAB, then VibrateResistance/VibratePulse combinations).
+ * Maps the CustomTriggerValueMode values onto raw legacy firmware mode
+ * bytes (community table: Off, Rigid, RigidA, RigidB, RigidAB, Pulse,
+ * PulseA, PulseB, PulseAB, then VibrateResistance/VibratePulse
+ * combinations).
  */
 vds::TriggerFfb custom_trigger_value(const Instruction &instruction) {
   static constexpr std::uint8_t kModeTable[] = {
@@ -4035,7 +4037,8 @@ vds::TriggerFfb custom_trigger_value(const Instruction &instruction) {
 
 /*
  * Maps the public trigger mode enum onto vDS trigger effect builders.
- * Named presets approximate the expected feel with the documented firmware modes.
+ * Named presets approximate the expected feel with the documented firmware
+ * modes.
  */
 vds::TriggerFfb trigger_from_instruction(const Instruction &instruction) {
   const unsigned mode = param_at(instruction, 2);

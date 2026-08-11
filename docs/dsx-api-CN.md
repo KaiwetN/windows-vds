@@ -4,7 +4,8 @@
 `udp://127.0.0.1:6969`。为 DSX 编写的游戏 mod 和工具(通过 UDP 发送
 instructions 包的那一类)无需修改即可驱动 vDS 的扳机与灯效。
 
-协议标识符与社区公开的 DSX UDP 示例一致。
+协议标识符(`InstructionType`、`TriggerModes`、`CustomTriggerValueMode` 等)
+与社区公开的 DSX UDP 示例一致。
 
 ## 报文格式
 

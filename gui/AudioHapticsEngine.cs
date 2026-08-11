@@ -1382,8 +1382,8 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
         }
 
         /// <summary>
-        /// Configures AudioToHaptics_Mix_Mode: low shelf on the first band,
-        /// peaking in the middle, high shelf on the last.
+        /// Configures the EQ chain: low shelf on the first band, peaking in
+        /// the middle, high shelf on the last.
         /// </summary>
         private void ConfigureEq(AudioHapticsSettings settings)
         {
@@ -1451,7 +1451,7 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
             left = _leftLowPass.Process(_leftHighPass.Process(left));
             right = _rightLowPass.Process(_rightHighPass.Process(right));
             // EQ sits pre-dynamics so the gate and compressor react to the
-            // shaped signal, matching the reference mix stage placement.
+            // shaped signal.
             for (var band = 0; band < _eqBandCount; band++)
             {
                 left = _leftEq[band].Process(left);
@@ -1474,8 +1474,8 @@ public sealed class AudioHapticsEngine : IAsyncDisposable
             var ratio = (float)Math.Clamp(settings.CompressionRatio, 1, 12);
             left = Compress(left, ratio);
             right = Compress(right, ratio);
-            // Source stereo channel mapping: pick the source stereo
-            // channel that feeds each actuator (0 = Left, 1 = Right).
+            // Pick the source stereo channel feeding each actuator
+            // (0 = Left, 1 = Right).
             var sourceLeft = left;
             var sourceRight = right;
             left = settings.LeftMotorSource == 1 ? sourceRight : sourceLeft;
