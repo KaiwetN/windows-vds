@@ -59,7 +59,7 @@ jobs:
       - name: Build Debian package
         run: |
           packaging/debian/build-deb.sh \
-            --revision "${{ inputs.debian_revision }}" \
+            --revision "${{ inputs.debian_revision || '1' }}" \
             --output-dir "$PWD/dist/debian"
 
       - name: Upload Debian package
@@ -104,7 +104,7 @@ jobs:
                 zstd
               git config --global --add safe.directory /work
               packaging/ArchLinux/build-arch.sh \
-                --pkgrel "${{ inputs.arch_pkgrel }}" \
+                --pkgrel "${{ inputs.arch_pkgrel || '1' }}" \
                 --output-dir /work/dist/ArchLinux
             '
 
