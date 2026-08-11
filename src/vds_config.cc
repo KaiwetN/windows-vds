@@ -234,6 +234,7 @@ std::string port_path_for_index(unsigned port) {
 }
 
 std::optional<unsigned> port_index_from_path(std::string_view path) {
+  bool usbip_port = false;
 #ifdef _WIN32
   constexpr std::string_view dos_prefix = R"(\\.\vds)";
   constexpr std::string_view nt_prefix = R"(\\?\vds)";
@@ -241,7 +242,6 @@ std::optional<unsigned> port_index_from_path(std::string_view path) {
   constexpr std::string_view usbip_prefix =
       "usbip://127.0.0.1:3240/1-";
   std::string_view port_text;
-  bool usbip_port = false;
   if (path.rfind(usbip_prefix, 0) == 0) {
     port_text = path.substr(usbip_prefix.size());
     usbip_port = true;
