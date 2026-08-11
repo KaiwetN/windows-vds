@@ -28,6 +28,8 @@
 !/gui/*.csproj
 !/gui/*.manifest
 !/gui/*.xaml
+!/gui/Sbc/
+!/gui/Sbc/*.cs
 
 !/include/
 !/include/**/
